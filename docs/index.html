@@ -44,6 +44,98 @@
             min-height: 100vh;
         }
 
+        /* Media & Connection Styles */
+        .link-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            margin-bottom: 24px;
+        }
+
+        .link-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border);
+            padding: 16px;
+            border-radius: 16px;
+            text-decoration: none;
+            transition: all 0.3s;
+        }
+
+        .link-item:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: var(--primary);
+            transform: translateX(5px);
+        }
+
+        .link-content {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .link-icon {
+            font-size: 24px;
+        }
+
+        .link-info {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .link-title {
+            color: var(--text-main);
+            font-weight: 700;
+            font-size: 16px;
+        }
+
+        .link-desc {
+            color: var(--text-sub);
+            font-size: 12px;
+        }
+
+        .link-arrow {
+            color: var(--primary);
+            font-weight: 900;
+        }
+
+        .sns-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+        }
+
+        .sns-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            background: var(--glass);
+            border: 1px solid var(--border);
+            padding: 20px 10px;
+            border-radius: 16px;
+            text-decoration: none;
+            color: var(--text-main);
+            font-size: 12px;
+            font-weight: 700;
+            transition: all 0.3s;
+        }
+
+        .sns-item:hover {
+            background: var(--accent);
+            color: white;
+            transform: translateY(-5px);
+            box-shadow: 0 5px 20px rgba(255, 0, 255, 0.4);
+            border-color: transparent;
+        }
+
+        .sns-icon {
+            font-size: 24px;
+        }
+
         /* Scanline Effect */
         body::after {
             content: "";
@@ -241,7 +333,7 @@
         }
 
         .fill-1 {
-            width: 95%;
+            width: 99%;
             background: linear-gradient(90deg, var(--secondary), var(--primary));
         }
 
@@ -251,7 +343,7 @@
         }
 
         .fill-3 {
-            width: 85%;
+            width: 95%;
             background: linear-gradient(90deg, var(--primary), var(--accent));
         }
 
@@ -400,7 +492,7 @@
             </div>
             <div class="card">
                 <span class="card-icon">🎂</span>
-                <span class="card-label">Est.</span>
+                <span class="card-label">Born</span>
                 <div class="card-value">1975</div>
             </div>
             <div class="card full">
