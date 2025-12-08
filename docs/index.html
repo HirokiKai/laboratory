@@ -1,1 +1,483 @@
-甲斐大樹
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>HIROKI KAI | e-Agency</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;500;700;900&family=Zen+Kaku+Gothic+New:wght@400;700;900&display=swap"
+        rel="stylesheet">
+    <style>
+        :root {
+            --primary: #CCFF00;
+            /* Neon Lime */
+            --accent: #FF00FF;
+            /* Neon Pink */
+            --secondary: #00FFFF;
+            /* Cyan */
+            --dark: #0a0a0a;
+            --glass: rgba(255, 255, 255, 0.05);
+            --border: rgba(255, 255, 255, 0.1);
+            --text-main: #ffffff;
+            --text-sub: rgba(255, 255, 255, 0.7);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            font-family: 'Outfit', 'Zen Kaku Gothic New', sans-serif;
+            background-color: var(--dark);
+            background-image: url('projects/visu/images/bg_main.avif');
+            background-size: cover;
+            background-position: center;
+            background-attachment: fixed;
+            color: var(--text-main);
+            overflow-x: hidden;
+            min-height: 100vh;
+        }
+
+        /* Scanline Effect */
+        body::after {
+            content: "";
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+            background-size: 100% 2px, 3px 100%;
+            pointer-events: none;
+            z-index: 1000;
+        }
+
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 24px;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* Hero Section */
+        .hero {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            margin-bottom: 40px;
+            animation: fadeInDown 1s ease-out;
+        }
+
+        .avatar-wrapper {
+            position: relative;
+            margin-bottom: 24px;
+        }
+
+        .avatar {
+            width: 160px;
+            height: 160px;
+            border-radius: 50%;
+            object-fit: cover;
+            border: 4px solid rgba(255, 255, 255, 0.2);
+            box-shadow: 0 0 30px var(--accent);
+            animation: pulse-glow 3s infinite;
+        }
+
+        .status-badge {
+            position: absolute;
+            bottom: 10px;
+            right: 0;
+            background: var(--primary);
+            color: var(--dark);
+            font-weight: 900;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 14px;
+            transform: rotate(-5deg);
+        }
+
+        h1 {
+            font-size: 48px;
+            font-weight: 900;
+            line-height: 1;
+            margin-bottom: 8px;
+            text-shadow: 0 0 10px var(--secondary);
+            background: linear-gradient(90deg, #fff, var(--secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -2px;
+        }
+
+        .role {
+            font-size: 16px;
+            color: var(--accent);
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            margin-bottom: 16px;
+        }
+
+        .bio {
+            font-size: 14px;
+            line-height: 1.6;
+            color: var(--text-sub);
+            max-width: 90%;
+            backdrop-filter: blur(4px);
+            background: rgba(0, 0, 0, 0.3);
+            padding: 12px;
+            border-radius: 12px;
+        }
+
+        /* Bento Grid */
+        .bento-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            margin-bottom: 40px;
+        }
+
+        .card {
+            background: var(--glass);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--border);
+            border-radius: 24px;
+            padding: 20px;
+            transition: transform 0.3s, box-shadow 0.3s;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(0, 255, 255, 0.1);
+            border-color: rgba(255, 255, 255, 0.3);
+        }
+
+        .card.full {
+            grid-column: 1 / -1;
+        }
+
+        .card-icon {
+            font-size: 24px;
+            margin-bottom: 12px;
+            display: block;
+        }
+
+        .card-label {
+            font-size: 10px;
+            text-transform: uppercase;
+            color: var(--text-sub);
+            letter-spacing: 1px;
+            margin-bottom: 4px;
+            display: block;
+        }
+
+        .card-value {
+            font-size: 18px;
+            font-weight: 700;
+            color: white;
+            line-height: 1.3;
+        }
+
+        /* Stats Section */
+        .stats-container {
+            background: rgba(0, 0, 0, 0.6);
+            border-radius: 24px;
+            padding: 24px;
+            border: 1px solid var(--border);
+            margin-bottom: 40px;
+        }
+
+        .section-title {
+            font-size: 20px;
+            font-weight: 900;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .section-title::before {
+            content: '';
+            display: block;
+            width: 4px;
+            height: 24px;
+            background: var(--primary);
+            border-radius: 2px;
+        }
+
+        .stat-item {
+            margin-bottom: 16px;
+        }
+
+        .stat-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 6px;
+            font-size: 14px;
+            font-weight: 700;
+        }
+
+        .progress-bar {
+            height: 10px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 5px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            border-radius: 5px;
+            position: relative;
+            animation: fill-bar 1.5s ease-out forwards;
+        }
+
+        .fill-1 {
+            width: 95%;
+            background: linear-gradient(90deg, var(--secondary), var(--primary));
+        }
+
+        .fill-2 {
+            width: 90%;
+            background: linear-gradient(90deg, var(--accent), var(--secondary));
+        }
+
+        .fill-3 {
+            width: 85%;
+            background: linear-gradient(90deg, var(--primary), var(--accent));
+        }
+
+        /* Tags */
+        .tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .tag {
+            font-size: 12px;
+            padding: 6px 12px;
+            border-radius: 100px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: var(--text-sub);
+            transition: all 0.2s;
+        }
+
+        .tag:hover {
+            background: var(--text-main);
+            color: var(--dark);
+            transform: rotate(2deg);
+        }
+
+        /* Footer */
+        .footer {
+            text-align: center;
+            padding-bottom: 40px;
+        }
+
+        .cta-btn {
+            display: inline-block;
+            background: var(--text-main);
+            color: var(--dark);
+            text-decoration: none;
+            font-weight: 900;
+            padding: 16px 40px;
+            border-radius: 100px;
+            font-size: 18px;
+            transition: all 0.3s;
+            box-shadow: 0 0 20px rgba(255, 255, 255, 0.3);
+            margin-bottom: 24px;
+        }
+
+        .cta-btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 0 40px var(--secondary);
+            background: var(--secondary);
+        }
+
+        .copyright {
+            font-size: 10px;
+            color: var(--text-sub);
+            letter-spacing: 2px;
+        }
+
+        /* Animation Keyframes */
+        @keyframes fadeInDown {
+            from {
+                opacity: 0;
+                transform: translateY(-20px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes pulse-glow {
+            0% {
+                box-shadow: 0 0 30px rgba(255, 0, 255, 0.5);
+            }
+
+            50% {
+                box-shadow: 0 0 60px rgba(255, 0, 255, 0.8);
+            }
+
+            100% {
+                box-shadow: 0 0 30px rgba(255, 0, 255, 0.5);
+            }
+        }
+
+        @keyframes fill-bar {
+            from {
+                width: 0;
+            }
+        }
+
+        /* Glitch Text Effect */
+        .glitch-text {
+            position: relative;
+        }
+
+        .glitch-text::before,
+        .glitch-text::after {
+            content: attr(data-text);
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+
+        .glitch-text::before {
+            left: 2px;
+            text-shadow: -1px 0 #ff00c1;
+            clip: rect(44px, 450px, 56px, 0);
+            animation: glitch-anim 5s infinite linear alternate-reverse;
+        }
+
+        .glitch-text::after {
+            left: -2px;
+            text-shadow: -1px 0 #00fff9;
+            clip: rect(44px, 450px, 56px, 0);
+            animation: glitch-anim2 5s infinite linear alternate-reverse;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="container">
+        <!-- Hero -->
+        <header class="hero">
+            <div class="avatar-wrapper">
+                <img src="projects/visu/images/mascot.png" alt="Hiroki Kai" class="avatar">
+                <div class="status-badge">ONLINE 🟢</div>
+            </div>
+            <h1 class="glitch-text" data-text="HIROKI KAI">HIROKI KAI</h1>
+            <p class="role">Director / Strategist</p>
+            <p class="bio">
+                Crafting the future of communication.<br>
+                Based in Tokyo 🇯🇵 / Born in Osaka 🐙
+            </p>
+        </header>
+
+        <!-- Bento Grid Info -->
+        <div class="bento-grid">
+            <div class="card">
+                <span class="card-icon">🏢</span>
+                <span class="card-label">Company</span>
+                <div class="card-value">e-Agency</div>
+            </div>
+            <div class="card">
+                <span class="card-icon">🎂</span>
+                <span class="card-label">Est.</span>
+                <div class="card-value">1975</div>
+            </div>
+            <div class="card full">
+                <span class="card-icon">🚀</span>
+                <span class="card-label">Main Mission</span>
+                <div class="card-value">Communication Design & <br>Local Revitalization</div>
+            </div>
+            <div class="card">
+                <span class="card-icon">🤝</span>
+                <span class="card-label">Community</span>
+                <div class="card-value">PTA VP</div>
+            </div>
+            <div class="card">
+                <span class="card-icon">💡</span>
+                <span class="card-label">Specialty</span>
+                <div class="card-value">Workshop</div>
+            </div>
+        </div>
+
+        <!-- Stats -->
+        <section class="stats-container">
+            <h2 class="section-title">SKILL SET</h2>
+
+            <div class="stat-item">
+                <div class="stat-header">
+                    <span>Communication</span>
+                    <span>99%</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill fill-1"></div>
+                </div>
+            </div>
+
+            <div class="stat-item">
+                <div class="stat-header">
+                    <span>Idea Generation</span>
+                    <span>90%</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill fill-2"></div>
+                </div>
+            </div>
+
+            <div class="stat-item">
+                <div class="stat-header">
+                    <span>Facilitation</span>
+                    <span>95%</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill fill-3"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Tags -->
+        <div class="card full" style="margin-bottom: 40px;">
+            <span class="card-icon">🏷️</span>
+            <span class="card-label">Keywords</span>
+            <div class="tags" style="margin-top: 10px;">
+                <span class="tag">#Director</span>
+                <span class="tag">#PR</span>
+                <span class="tag">#RegionalRevitalization</span>
+                <span class="tag">#Ideathon</span>
+                <span class="tag">#DigitalMarketing</span>
+                <span class="tag">#CommunityDesign</span>
+                <span class="tag">#Shibuya</span>
+                <span class="tag">#Kyoto</span>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <a href="https://www.e-agency.co.jp/" target="_blank" class="cta-btn">VISIT WEBSITE</a>
+            <p class="copyright">© 2025 HIROKI KAI / e-Agency<br>DESIGNED BY AI AGENT</p>
+        </footer>
+    </div>
+
+</body>
+
+</html>
