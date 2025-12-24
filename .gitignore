@@ -1,0 +1,92 @@
+# OS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Dependency directories
+node_modules/
+
+# Build output
+.dist/
+dist/
+build/
+
+# Coverage
+coverage/
+
+# Env files
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# Misc
+*.tmp
+*.swp
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# macOS metadata
+.fseventsd/
+
+# Node.js
+.npm/
+.pnpm-store/
+.yarn/
+.yarn-cache/
+.yarn-unplugged/
+.yarn-integrity
+.yarn-build-state.yml
+.pnp.*
+.eslintcache
+.turbo/
+.vite/
+.next/
+.nuxt/
+.svelte-kit/
+.parcel-cache/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pdb
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.envrc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Ruby
+.bundle/
+vendor/bundle/
+.ruby-version
+
+# Java/Kotlin
+*.class
+*.jar
+*.war
+*.ear
+*.iml
+.gradle/
+build/
+out/
+
+# Go
+bin/
+/pkg/

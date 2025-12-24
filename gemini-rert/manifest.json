@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Gemini ReRT",
+  "version": "1.0",
+  "description": "Auto-generate RT and reply drafts on X using Gemini.",
+  "permissions": ["storage"],
+  "host_permissions": ["https://generativelanguage.googleapis.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://x.com/*", "https://twitter.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

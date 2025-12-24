@@ -1,0 +1,74 @@
+/* --- BLUR MODE --- */
+body.xa-blur-mode [data-testid="Tweet-User-Avatar"],
+body.xa-blur-mode [data-testid="User-Avatar-Container-Unknown"],
+body.xa-blur-mode div[style*="background-image"][style*="/profile_images/"] {
+    filter: blur(5px) !important;
+    transition: filter 0.2s;
+}
+
+body.xa-blur-mode [data-testid="Tweet-User-Avatar"]:hover,
+body.xa-blur-mode [data-testid="User-Avatar-Container-Unknown"]:hover {
+    filter: blur(2px) !important;
+}
+
+body.xa-blur-mode [data-testid="User-Name"] {
+    filter: blur(4px) !important;
+    user-select: none;
+}
+
+/* --- RANDOM MODE --- */
+
+/* Random Mode Text Replacement - Improved for Parent Targeting */
+/* This logic relies on content.js spotting the parent of the name and adding .xa-name-replaced */
+
+.xa-random-mode .xa-name-replaced {
+    position: relative !important;
+    display: inline-flex !important;
+    /* Keep inline layout but allow flex for alignment if needed */
+    color: transparent !important;
+    overflow: visible !important;
+}
+
+/* Hide ALL children of the replaced container (Original Name, Emoji, etc) */
+.xa-random-mode .xa-name-replaced>* {
+    visibility: hidden !important;
+    width: 0 !important;
+    height: 0 !important;
+    position: absolute !important;
+    /* Remove from flow */
+    pointer-events: none !important;
+}
+
+/* Show the fake name via pseudo-element */
+.xa-random-mode .xa-name-replaced::after {
+    content: attr(data-xa-fake-name);
+    position: static !important;
+    /* Re-insert into flow */
+    color: #0f1419;
+    /* Default text color (Dark) */
+    visibility: visible !important;
+    white-space: nowrap;
+    font-weight: bold;
+    pointer-events: auto;
+    /* Allow clicking if it's a link */
+}
+
+/* Dark Mode Support for Text */
+@media (prefers-color-scheme: dark) {
+    .xa-random-mode .xa-name-replaced::after {
+        color: #e7e9ea;
+    }
+}
+
+/* X specific dark mode check */
+body[style*="background-color: black"] .xa-name-replaced::after,
+body[style*="background-color: rgb(0, 0, 0)"] .xa-name-replaced::after {
+    color: #e7e9ea;
+}
+
+
+/* 2. IMAGE REPLACEMENT */
+body.xa-random-mode [data-testid="Tweet-User-Avatar"] img.xa-swapped-img {
+    opacity: 1 !important;
+    visibility: visible !important;
+}

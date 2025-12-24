@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Gemini Oneword",
+  "version": "1.0",
+  "description": "Summarize Japanese tweets into a one-line gist using Gemini.",
+  "permissions": ["storage"],
+  "host_permissions": ["https://generativelanguage.googleapis.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://x.com/*", "https://twitter.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": false
+  }
+}

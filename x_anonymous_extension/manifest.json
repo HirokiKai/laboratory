@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "X Anonymous",
+  "version": "1.2",
+  "description": "Obfuscate user avatars and names on X (formerly Twitter) with Blur or Random modes.",
+  "permissions": [
+    "storage"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://twitter.com/*",
+        "https://x.com/*"
+      ],
+      "css": [
+        "styles.css"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start"
+    }
+  ]
+}
