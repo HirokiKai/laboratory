@@ -684,19 +684,20 @@ function checkAndQueue(element) {
         const cachedOriginal = originalTextCache.get(tweetId);
         const currentText = element.innerText;
 
-        // If we have a cached translation but the visible text grew (e.g., after opening detail view),
-        // retranslate to include the newly revealed part.
+        // If previously translated text differs from current visible text (e.g., after "Show more"),
+        // retranslate to include the newly revealed portion.
         const needsRetranslate =
             cachedOriginal &&
             currentText &&
-            currentText.length > cachedOriginal.length + 2; // allow minor whitespace diffs
+            currentText.trim().length > cachedOriginal.trim().length + 1; // minor whitespace tolerance
 
         if (needsRetranslate) {
             queueRetranslation(element, currentText);
             return;
         }
 
-        if (cachedTranslation) {
+        // If we have a translation AND the underlying text hasn't changed, reuse it
+        if (cachedTranslation && cachedOriginal && currentText === cachedOriginal) {
             applyTranslation(element, cachedTranslation);
             return;
         }

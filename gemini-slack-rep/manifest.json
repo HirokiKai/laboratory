@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Gemini Slack Reply",
+  "version": "1.0.0",
+  "description": "Generate Slack thread replies with Gemini and insert into the composer.",
+  "permissions": ["storage"],
+  "host_permissions": ["https://generativelanguage.googleapis.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://app.slack.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options.html",
+  "action": {
+    "default_title": "Gemini Slack Reply"
+  }
+}
