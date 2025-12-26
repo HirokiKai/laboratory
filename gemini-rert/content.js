@@ -7,6 +7,19 @@ const PANEL_Z_INDEX_MINIMIZED = 2147483000;
 const CHARS_PER_TOKEN = 4;
 const MAX_PROMPT_PATTERNS = 5;
 const DEFAULT_PROMPT_TEMPLATE = `次の投稿内容から{{mode}}してください。\n\n条件:\n- 40〜80文字\n- 観察者の視点で、事実と解釈を分けて\n- 不特定多数に伝わるようにする\n- 出力は本文だけ\n- 前置き、記号、注釈は不要\n\n投稿内容:\n{{text}}`;
+const SHIMMER_STYLE = `
+  @keyframes rr-shimmer { 0% { background-position: -200px 0; } 100% { background-position: 200px 0; } }
+  .rr-shimmer {
+    position: relative;
+    color: transparent !important;
+    background: linear-gradient(90deg, #f1f3f4 0%, #e6ecf0 50%, #f1f3f4 100%);
+    background-size: 200px 100%;
+    animation: rr-shimmer 1.1s linear infinite;
+    border-radius: 6px;
+  }
+  @keyframes rr-flash { 0% { background-color: #e8f5fd; } 100% { background-color: transparent; } }
+  .rr-done { animation: rr-flash 0.8s ease; }
+`;
 
 const DEFAULT_MODEL = 'gemini-2.5-flash-lite';
 const MODEL_MIGRATION_KEY = 'geminiModelMigratedTo25FlashLite';
@@ -23,6 +36,7 @@ let isPanelMinimized = true;
 let cachedApiKey = '';
 const draftCache = new Map();
 const pendingDrafts = new Set();
+let toastContainer = null;
 
 function getTweetTextElements(root) {
   const primary = root.querySelectorAll ? root.querySelectorAll('[data-testid="tweetText"]') : [];
@@ -40,6 +54,31 @@ async function ensureApiKey() {
 
 function getCacheKey(text, mode) {
   return `${mode}::${text.trim()}`;
+}
+
+function ensureToast() {
+  if (toastContainer) return toastContainer;
+  const div = document.createElement('div');
+  div.id = 'rr-toast';
+  div.style.cssText = 'position:fixed;top:12px;right:12px;z-index:2147483646;display:flex;flex-direction:column;gap:8px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;';
+  document.body.appendChild(div);
+  toastContainer = div;
+  return div;
+}
+
+function showToast(message, tone = 'info') {
+  const container = ensureToast();
+  const toast = document.createElement('div');
+  toast.textContent = message;
+  toast.style.cssText = 'padding:10px 12px;border-radius:10px;box-shadow:rgba(0,0,0,0.12) 0 6px 16px; background:' +
+    (tone === 'error' ? '#ffe6e6' : tone === 'success' ? '#e6ffed' : '#f7f9f9') +
+    '; color:#0f1419; min-width: 200px;';
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.style.opacity = '0';
+    toast.style.transition = 'opacity 160ms ease';
+    setTimeout(() => toast.remove(), 200);
+  }, 2200);
 }
 
 function createPanel() {
@@ -61,10 +100,35 @@ function createPanel() {
 
   section.innerHTML = `
     <style>
+      ${SHIMMER_STYLE}
       #rr-expanded-view { transform-origin: top right; transition: opacity 220ms ease, transform 260ms cubic-bezier(0.2, 0.9, 0.2, 1); }
       #rr-minimized-view { transform-origin: top right; transition: opacity 180ms ease, transform 220ms cubic-bezier(0.2, 0.9, 0.2, 1); }
       .rr-hidden { opacity: 0; transform: scale(0.92); pointer-events: none; }
       .rr-visible { opacity: 1; transform: scale(1); }
+      .rr-tab-btn {
+        flex:1;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        padding:12px 10px;
+        border:1.5px solid #d4dce3;
+        background:#fff;
+        cursor:pointer;
+        font-weight:800;
+        font-size:13px;
+        border-radius:14px;
+        color:#0f1419;
+        box-shadow: inset 0 0 0 0 transparent;
+        transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+      }
+      .rr-tab-btn.active {
+        background:#0f1419;
+        color:#ffffff;
+        border-color:#0f1419;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.18);
+      }
+      .rr-tab-pane { display:none; }
+      .rr-tab-pane.active { display:block; }
     </style>
 
     <div id="rr-expanded-view" class="css-175oi2r r-105ug2t r-14lw9ot r-1867qdf r-1upvrn0 r-13awgt0 r-1ce3o0f r-1udh08x r-u8s1d r-13qz1uu rr-hidden" style="width: 300px; max-height: 80vh; display: none; flex-direction: column; box-shadow: rgba(101, 119, 134, 0.2) 0px 0px 15px, rgba(101, 119, 134, 0.15) 0px 0px 3px 1px; border-radius: 16px; background-color: white; position: relative;">
@@ -73,6 +137,12 @@ function createPanel() {
         <div style="font-weight: 800; font-size: 15px; color: #0f1419;">Gemini ReRT</div>
       </div>
       <div id="rr-body" style="padding: 16px; overflow-y: auto;">
+        <div style="display:flex; gap:8px; margin-bottom:12px;">
+          <button class="rr-tab-btn active" data-tab="gen">生成</button>
+          <button class="rr-tab-btn" data-tab="pattern">パターン</button>
+          <button class="rr-tab-btn" data-tab="settings">設定</button>
+        </div>
+        <div id="rr-tab-gen" class="rr-tab-pane active">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
           <span style="font-size: 14px; font-weight: 700; color: #0f1419;">自動下書き</span>
           <label style="position: relative; display: inline-block; width: 44px; height: 24px;">
@@ -90,7 +160,8 @@ function createPanel() {
             <span>Out: <b id="rr-output-chars" style="color: #0f1419;">0</b></span>
           </div>
         </div>
-
+        </div>
+        <div id="rr-tab-pattern" class="rr-tab-pane">
         <div style="margin-bottom: 12px;">
           <label style="display: block; font-size: 13px; margin-bottom: 6px; font-weight: 700; color: #0f1419;">プロンプトパターン</label>
           <select id="rr-pattern-select" style="width: 100%; appearance: none; -webkit-appearance: none; background-color: white; border: 1px solid #cfd9de; border-radius: 8px; padding: 10px 32px 10px 12px; font-size: 14px; color: #0f1419; font-weight: 500; cursor: pointer;"></select>
@@ -108,12 +179,8 @@ function createPanel() {
         </div>
 
         <button id="rr-pattern-add" style="width: 100%; margin-bottom: 12px; background-color: #f7f9f9; color: #0f1419; border: 1px dashed #cfd9de; padding: 10px; border-radius: 10px; cursor: pointer; font-weight: 700; font-size: 13px;">+ 新規パターン</button>
-
-        <button id="rr-settings-toggle" style="width: 100%; text-align: left; background: none; border: none; padding: 0; cursor: pointer; display: flex; align-items: center; gap: 6px; color: #2ecc71; font-weight: 600; font-size: 13px;">
-          <span style="font-size: 16px;">⚙️</span> 設定 (モデル・キー)
-        </button>
-
-        <div id="rr-settings-content" style="display: none; margin-top: 15px;">
+        </div>
+        <div id="rr-tab-settings" class="rr-tab-pane">
           <div style="margin-bottom: 15px;">
             <label style="display: block; font-size: 13px; margin-bottom: 6px; font-weight: 700; color: #0f1419;">モデル</label>
             <select id="rr-model" style="width: 100%; appearance: none; -webkit-appearance: none; background-color: white; border: 1px solid #cfd9de; border-radius: 8px; padding: 10px 32px 10px 12px; font-size: 14px; color: #0f1419; font-weight: 500; cursor: pointer;">
@@ -165,6 +232,12 @@ function setupPanelLogic(panel) {
   const minimizeBtn = panel.querySelector('#rr-minimize-btn');
   const toggle = panel.querySelector('#rr-toggle');
   const knob = panel.querySelector('#rr-slider-knob');
+  const tabButtons = Array.from(panel.querySelectorAll('.rr-tab-btn'));
+  const tabPanes = {
+    gen: panel.querySelector('#rr-tab-gen'),
+    pattern: panel.querySelector('#rr-tab-pattern'),
+    settings: panel.querySelector('#rr-tab-settings')
+  };
   const patternSelect = panel.querySelector('#rr-pattern-select');
   const patternNameInput = panel.querySelector('#rr-pattern-name');
   const patternPromptInput = panel.querySelector('#rr-pattern-prompt');
@@ -176,8 +249,6 @@ function setupPanelLogic(panel) {
   const costEl = panel.querySelector('#rr-cost');
   const inputCharsEl = panel.querySelector('#rr-input-chars');
   const outputCharsEl = panel.querySelector('#rr-output-chars');
-  const settingsToggle = panel.querySelector('#rr-settings-toggle');
-  const settingsContent = panel.querySelector('#rr-settings-content');
   const minimizedMain = panel.querySelector('#rr-minimize-main');
   let minimizedAnchorRightPx = PANEL_MARGIN.right;
   let minimizedAnchorTopPx = PANEL_MARGIN.top;
@@ -191,6 +262,22 @@ function setupPanelLogic(panel) {
     panel.style.setProperty('left', 'auto', 'important');
   };
 
+  const applyResponsiveLayout = (isMinimized) => {
+    const isMobile = window.innerWidth < 768;
+    if (isMobile) {
+      panel.style.width = 'calc(100% - 24px)';
+      panel.style.left = '12px';
+      panel.style.right = '12px';
+      panel.style.bottom = '16px';
+      panel.style.top = 'auto';
+    } else {
+      panel.style.left = 'auto';
+      panel.style.bottom = 'auto';
+      setPanelFixedPosition(`${PANEL_MARGIN.top}px`, `${PANEL_MARGIN.right}px`);
+      panel.style.width = isMinimized ? 'auto' : '300px';
+    }
+  };
+
   const updateMinimizedAnchorRight = () => {
     const rect = minimizedMain.getBoundingClientRect();
     minimizedAnchorRightPx = Math.max(0, Math.round(window.innerWidth - rect.right));
@@ -199,6 +286,7 @@ function setupPanelLogic(panel) {
 
   const setPanelState = (minimize) => {
     isPanelMinimized = minimize;
+    applyResponsiveLayout(minimize);
     if (minimize) {
       panel.style.zIndex = PANEL_Z_INDEX_MINIMIZED;
       setPanelFixedPosition(`${PANEL_MARGIN.top}px`, `${PANEL_MARGIN.right}px`);
@@ -264,9 +352,15 @@ function setupPanelLogic(panel) {
     setPanelState(false);
   });
 
-  settingsToggle.addEventListener('click', () => {
-    const isHidden = settingsContent.style.display === 'none';
-    settingsContent.style.display = isHidden ? 'block' : 'none';
+  tabButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const tab = btn.dataset.tab;
+      tabButtons.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      Object.entries(tabPanes).forEach(([key, pane]) => {
+        if (pane) pane.classList.toggle('active', key === tab);
+      });
+    });
   });
 
   toggle.addEventListener('change', (e) => {
@@ -320,12 +414,14 @@ function setupPanelLogic(panel) {
     'geminiApiKey',
     'rertPromptPatterns',
     'rertSelectedPatternId',
+    'rertInlineButtons',
     'modelStats',
     MODEL_MIGRATION_KEY
   ], (res) => {
     const isEnabled = res.rertEnabled !== false;
     toggle.checked = isEnabled;
     updateToggleStyle(isEnabled);
+    inlineButtonsEnabled = false;
 
     let currentModel = res.geminiModel || DEFAULT_MODEL;
     if (!res[MODEL_MIGRATION_KEY]) {
@@ -474,6 +570,7 @@ function setupPanelLogic(panel) {
     panel.style.top = `${initialTop + dy}px`;
   });
   document.addEventListener('mouseup', () => { isDragging = false; });
+  window.addEventListener('resize', () => applyResponsiveLayout(isPanelMinimized));
 }
 
 function getDialogRoot() {
@@ -496,6 +593,42 @@ function detectMode(dialog) {
   const dialogText = dialog.innerText || '';
   if (dialogText.includes('返信先')) return 'reply';
   return 'quote';
+}
+
+function addInlineControls(dialog) {
+  const shouldShow = inlineButtonsEnabled;
+  if (!shouldShow) {
+    const exist = dialog?.querySelector && dialog.querySelector('.rr-inline-bar');
+    if (exist && exist.remove) exist.remove();
+    return;
+  }
+  if (!dialog || dialog.querySelector('.rr-inline-bar')) return;
+  const textarea = getComposerTextArea(dialog);
+  if (!textarea) return;
+  const bar = document.createElement('div');
+  bar.className = 'rr-inline-bar';
+  bar.style.cssText = 'display:flex;gap:10px;margin:8px 0 6px 4px;align-items:center;flex-wrap:wrap;justify-content:flex-end;width:100%;';
+  const makeBtn = (label, mode) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.cssText = 'padding:8px 14px;border-radius:12px;border:1.5px solid #d4dce3;background:#fff;cursor:pointer;font-size:12px;font-weight:800;line-height:1.1;box-shadow:0 1px 3px rgba(0,0,0,0.06);transition:transform 0.12s ease, box-shadow 0.12s ease;';
+    b.addEventListener('mouseenter', () => {
+      b.style.boxShadow = '0 2px 6px rgba(0,0,0,0.12)';
+      b.style.transform = 'translateY(-1px)';
+    });
+    b.addEventListener('mouseleave', () => {
+      b.style.boxShadow = '0 1px 3px rgba(0,0,0,0.06)';
+      b.style.transform = 'translateY(0)';
+    });
+    b.addEventListener('click', (e) => {
+      e.preventDefault();
+      generateAndAppendDraft(dialog, textarea, { mode, allowOverwrite: true });
+    });
+    return b;
+  };
+  bar.appendChild(makeBtn('返信案', 'reply'));
+  bar.appendChild(makeBtn('引用RT案', 'quote'));
+  textarea.parentElement && textarea.parentElement.insertAdjacentElement('beforebegin', bar);
 }
 
 function insertTextAtEnd(el, text) {
@@ -539,15 +672,22 @@ function insertTextAtEnd(el, text) {
   }
 }
 
-async function generateAndAppendDraft(dialog, textarea) {
+async function generateAndAppendDraft(dialog, textarea, options = {}) {
   if (!dialog || !textarea) return;
-  if (textarea.dataset.geminiRertFilled === 'true') return;
-  if (dialog.dataset.geminiRertProcessed === 'true') return;
-  if (dialog.dataset.geminiRertProcessing === 'true') return;
+  const { mode: forcedMode = null, allowOverwrite = false } = options;
+  if (!allowOverwrite) {
+    if (textarea.dataset.geminiRertFilled === 'true') return;
+    if (dialog.dataset.geminiRertProcessed === 'true') return;
+    if (dialog.dataset.geminiRertProcessing === 'true') return;
+  }
   if (!dialog.isConnected || !textarea.isConnected) return;
   const apiKey = await ensureApiKey();
-  if (!apiKey) return;
+  if (!apiKey) {
+    showToast('APIキーを設定してください', 'error');
+    return;
+  }
   dialog.dataset.geminiRertProcessing = 'true';
+  textarea.classList.add('rr-shimmer');
 
   let processed = false;
   let sourceText = '';
@@ -555,10 +695,12 @@ async function generateAndAppendDraft(dialog, textarea) {
     sourceText = getSourceTweetText(dialog);
     if (!sourceText || sourceText.length < 3) return;
 
-    const mode = detectMode(dialog);
+    const mode = forcedMode || detectMode(dialog);
     const pendingKey = getCacheKey(sourceText, mode);
-    if (pendingDrafts.has(pendingKey)) return;
-    pendingDrafts.add(pendingKey);
+    if (!allowOverwrite) {
+      if (pendingDrafts.has(pendingKey)) return;
+      pendingDrafts.add(pendingKey);
+    }
     const cacheKey = getCacheKey(sourceText, mode);
     const cached = draftCache.get(cacheKey);
     if (cached) {
@@ -568,6 +710,9 @@ async function generateAndAppendDraft(dialog, textarea) {
       textarea.dataset.geminiRertFilled = 'true';
       dialog.dataset.geminiRertProcessed = 'true';
       processed = true;
+      textarea.classList.remove('rr-shimmer');
+      textarea.classList.add('rr-done');
+      setTimeout(() => textarea.classList.remove('rr-done'), 700);
       return;
     }
 
@@ -579,7 +724,10 @@ async function generateAndAppendDraft(dialog, textarea) {
       }, (res) => resolve(res));
     });
 
-    if (!response || !response.success) return;
+    if (!response || !response.success) {
+      showToast(response?.error || '生成に失敗しました', 'error');
+      return;
+    }
 
     if (!dialog.isConnected || !textarea.isConnected) return;
     const current = (textarea.innerText || '').trim();
@@ -589,6 +737,9 @@ async function generateAndAppendDraft(dialog, textarea) {
     textarea.dataset.geminiRertFilled = 'true';
     dialog.dataset.geminiRertProcessed = 'true';
     processed = true;
+    textarea.classList.remove('rr-shimmer');
+    textarea.classList.add('rr-done');
+    setTimeout(() => textarea.classList.remove('rr-done'), 700);
   } finally {
     if (sourceText) {
       const mode = detectMode(dialog);
@@ -596,6 +747,7 @@ async function generateAndAppendDraft(dialog, textarea) {
     }
     if (!processed) {
       dialog.dataset.geminiRertProcessing = 'false';
+      textarea.classList.remove('rr-shimmer');
     } else {
       dialog.dataset.geminiRertProcessing = 'false';
     }
@@ -607,6 +759,7 @@ const observer = new MutationObserver(() => {
   if (!dialog) return;
   const textarea = getComposerTextArea(dialog);
   if (!textarea) return;
+  addInlineControls(dialog);
   generateAndAppendDraft(dialog, textarea).catch((e) => console.error('[Gemini ReRT] failed:', e));
 });
 
@@ -620,3 +773,33 @@ if (document.readyState === 'loading') {
 } else {
   startObserving();
 }
+
+// Keyboard shortcuts for dialog actions
+document.addEventListener('keydown', (e) => {
+  const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : '';
+  if (tag === 'input' || tag === 'textarea' || e.metaKey || e.ctrlKey || e.altKey) return;
+  const dialog = getDialogRoot();
+  if (!dialog) return;
+  const textarea = getComposerTextArea(dialog);
+  if (!textarea) return;
+  if (e.shiftKey && (e.key === 'R' || e.key === 'r')) {
+    // toggle panel
+    const minimized = document.getElementById('rr-minimized-view');
+    const expanded = document.getElementById('rr-expanded-view');
+    if (expanded && expanded.classList.contains('rr-hidden')) {
+      minimized && minimized.click();
+    } else if (expanded) {
+      const btn = document.getElementById('rr-minimize-btn');
+      btn && btn.click();
+    }
+    e.preventDefault();
+  }
+  if (e.shiftKey && (e.key === 'Q' || e.key === 'q')) {
+    generateAndAppendDraft(dialog, textarea, { mode: 'quote', allowOverwrite: true });
+    e.preventDefault();
+  }
+  if (e.shiftKey && (e.key === 'Y' || e.key === 'y')) {
+    generateAndAppendDraft(dialog, textarea, { mode: 'reply', allowOverwrite: true });
+    e.preventDefault();
+  }
+});

@@ -742,6 +742,10 @@ function setupPanelLogic(panel) {
 
 // requestTranslation: Send to background
 function requestTranslation(texts, direction) {
+    if (!(chrome && chrome.runtime && chrome.runtime.sendMessage)) {
+        console.warn('[Gemini Trans] runtime unavailable');
+        return Promise.resolve({ error: 'runtime unavailable' });
+    }
     return new Promise((resolve, reject) => {
         chrome.runtime.sendMessage({
             type: 'TRANSLATE_TEXT_BG',
