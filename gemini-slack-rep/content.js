@@ -2,14 +2,15 @@
 typeof console !== 'undefined' && console.log('[Gemini Slack Reply] loaded');
 
 const PANEL_ID = 'gslr-panel';
+const BUTTON_ID = 'gslr-header-btn';
 const PANEL_Z_EXPANDED = 2147483647;
-const PANEL_Z_MINIMIZED = 2147483000;
 const CHARS_PER_TOKEN = 4;
-const RUN_DEBOUNCE_MS = 1200;
+const RUN_DEBOUNCE_MS = 300;
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const DEFAULTS = {
   model: 'gemini-2.5-flash-lite',
-  enabled: true
+  enabled: true,
+  debug: false
 };
 
 const PRICING = {
@@ -22,7 +23,14 @@ const PRICING = {
 const FIXED_PARAMS = {
   temperature: 0.7,
   topP: 0.9,
-  maxTokens: 500
+  maxTokens: 2048
+};
+
+// Model-specific output token ceilings (largerモデルで途切れないように少し多め)
+const MODEL_MAX_TOKENS = {
+  'gemini-3-flash-preview': 2048,
+  'gemini-2.5-flash': 2048,
+  'gemini-2.5-flash-lite': 2048
 };
 
 let cachedKey = '';
@@ -30,7 +38,6 @@ let settingsCache = { ...DEFAULTS };
 let observing = false;
 let cancelFlag = false;
 let generationInFlight = false;
-let processingPane = null;
 let modelStatsCache = {};
 let lastContextKey = '';
 let lastContextTime = 0;
@@ -39,33 +46,82 @@ let lastObserverRun = 0;
 const replyCache = new Map(); // key -> { ts, draft }
 const threadProcessed = new Set(); // threadKey strings
 const threadDraftMap = new Map(); // threadKey -> draft
+const threadLock = new Set(); // threadKey processing mutex
+const activeDropdowns = new Set(); // track open dropdown menus
+const CHANNEL_TYPE = {
+  PUBLIC: 'public',
+  PRIVATE: 'private',
+  DM: 'dm',
+  MPDM: 'mpdm',
+  UNKNOWN: 'unknown'
+};
+
+// Global click handler for closing dropdowns (prevents memory leak)
+document.addEventListener('click', (e) => {
+  activeDropdowns.forEach(menu => {
+    if (!menu.parentElement?.contains(e.target)) {
+      menu.style.display = 'none';
+    }
+  });
+});
 
 // ---------- Storage helpers ----------
 async function loadSettings() {
-  const data = await chrome.storage.local.get([
-    'geminiApiKey',
-    'gslrModel',
-    'gslrEnabled',
-    'modelStats'
-  ]);
-  cachedKey = (data.geminiApiKey || '').trim();
-  settingsCache = {
-    model: data.gslrModel || DEFAULTS.model,
-    enabled: data.gslrEnabled !== false
-  };
-  modelStatsCache = data.modelStats || {};
+  try {
+    const data = await chrome.storage.local.get([
+      'geminiApiKey',
+      'gslrModel',
+      'gslrEnabled',
+      'gslrInstruction',
+      'gslrMyName',
+      'gslrRelationships',
+      'gslrHonorific',
+      'gslrDebug',
+      'modelStats'
+    ]);
+    cachedKey = (data.geminiApiKey || '').trim();
+    settingsCache = {
+      model: data.gslrModel || DEFAULTS.model,
+      enabled: data.gslrEnabled !== false,
+      instruction: data.gslrInstruction || '',
+      myName: data.gslrMyName || '',
+      relationships: data.gslrRelationships || '',
+      honorific: data.gslrHonorific || 'さん',
+      debug: data.gslrDebug === true
+    };
+    modelStatsCache = data.modelStats || {};
+  } catch (e) {
+    if (e.message.includes('Extension context invalidated')) {
+      console.log('Context invalidated during loadSettings');
+      return;
+    }
+    throw e;
+  }
 }
 
 async function saveSettings(partial) {
-  const next = { ...settingsCache, ...partial };
-  const payload = {
-    geminiApiKey: partial.geminiApiKey !== undefined ? partial.geminiApiKey : cachedKey,
-    gslrModel: next.model,
-    gslrEnabled: next.enabled
-  };
-  cachedKey = payload.geminiApiKey;
-  settingsCache = next;
-  await chrome.storage.local.set(payload);
+  try {
+    const next = { ...settingsCache, ...partial };
+    const payload = {
+      geminiApiKey: partial.geminiApiKey !== undefined ? partial.geminiApiKey : cachedKey,
+      gslrModel: next.model,
+      gslrEnabled: next.enabled,
+      gslrInstruction: next.instruction,
+      gslrMyName: next.myName,
+      gslrRelationships: next.relationships,
+      gslrHonorific: next.honorific,
+      gslrDebug: next.debug === true
+    };
+    cachedKey = payload.geminiApiKey;
+    settingsCache = next;
+    await chrome.storage.local.set(payload);
+  } catch (e) {
+    if (e.message.includes('Extension context invalidated')) {
+      showToast('拡張機能が更新されました。ページを再読み込みしてください。', 5000);
+      return;
+    }
+    throw e;
+  }
 }
 
 // ---------- DOM helpers ----------
@@ -91,6 +147,44 @@ function findMessages(pane) {
   const bodySelectors = ['.p-rich_text_section', '.c-message__body', '.p-rich_text_block'];
   const senderSelectors = ['[data-qa="message_sender_name"]', '.c-message__sender_button', '.p-message_sender__name'];
 
+  const getTsFromNode = (node) => {
+    const attrs = ['data-ts', 'data-qa-ts', 'data-message-ts', 'data-ts-value'];
+    const grab = (el) => {
+      if (!el) return null;
+      for (const a of attrs) {
+        const v = el.getAttribute?.(a);
+        if (v) {
+          const n = parseFloat(v);
+          if (!Number.isNaN(n)) return n;
+        }
+      }
+      // time element with datetime
+      const t = el.querySelector?.('time');
+      const dt = t?.getAttribute?.('datetime') || t?.dateTime;
+      if (dt) {
+        const n = Date.parse(dt);
+        if (!Number.isNaN(n)) return n / 1000;
+      }
+      const aria = t?.getAttribute?.('aria-label');
+      if (aria && /\d{4}/.test(aria)) {
+        const n = Date.parse(aria);
+        if (!Number.isNaN(n)) return n / 1000;
+      }
+      return null;
+    };
+    // try node itself, descendants, then ancestors
+    const self = grab(node);
+    if (self) return self;
+    const desc = Array.from(node.querySelectorAll?.('[data-ts], time') || []);
+    for (const d of desc) {
+      const v = grab(d);
+      if (v) return v;
+    }
+    const anc = node.closest?.('[data-ts], [data-message-ts]');
+    if (anc) return grab(anc);
+    return null;
+  };
+
   const nodes = [];
   msgSelectors.forEach(sel => nodes.push(...qsa(sel, pane)));
   const uniq = Array.from(new Set(nodes));
@@ -100,11 +194,13 @@ function findMessages(pane) {
     const bodyEl = bodySelectors.map(s => qs(s, node)).find(Boolean);
     const sender = (senderEl?.textContent || '').trim();
     const text = (bodyEl?.textContent || '').trim();
+    const tsSec = getTsFromNode(node);
     return {
       sender,
       text,
       isParent: idx === 0,
-      ts: idx
+      ts: idx,
+      tsSec
     };
   }).filter(m => m.text);
 }
@@ -118,8 +214,8 @@ function formatContext(messages) {
     .join('\n');
 }
 
-function findComposer(pane) {
-  return qs('.ql-editor[contenteditable="true"]', pane || document);
+function findAllComposers(pane) {
+  return qsa('.ql-editor[contenteditable="true"]', pane || document);
 }
 
 function insertText(editor, text) {
@@ -132,12 +228,29 @@ function insertText(editor, text) {
     const data = new DataTransfer();
     data.setData('text/plain', full);
     const ev = new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data });
-    const ok = editor.dispatchEvent(ev);
-    if (ok) return;
+    const notCancelled = editor.dispatchEvent(ev);
+    if (!notCancelled) return;
   } catch (e) {
     // fallback
   }
   document.execCommand('insertText', false, full);
+}
+
+// Replace entire composer content with text, restoring previous content on failure
+function replaceTextSafely(editor, text) {
+  if (!editor) return false;
+  const prevHtml = editor.innerHTML;
+  try {
+    editor.innerText = text; // simple deterministic insert
+  } catch (e) {
+    editor.innerHTML = prevHtml;
+    return false;
+  }
+  const afterNorm = normalizeText(editor.innerText);
+  const targetNorm = normalizeText(text);
+  const ok = !!afterNorm && afterNorm.includes(targetNorm);
+  if (!ok) editor.innerHTML = prevHtml;
+  return ok;
 }
 
 function showToast(message, duration = 2000) {
@@ -163,19 +276,79 @@ function setLoading(editor, on) {
   }
 }
 
-// ---------- Panel UI ----------
+// ---------- UI Components ----------
+
+function ensureHeaderButton() {
+  if (qs(`#${BUTTON_ID}`)) return;
+
+  // Try to find the container in the top nav
+  // User provided: .p-ia4_top_nav__right_container -> .align_items_center.display_flex
+  const rightContainer = qs('.p-ia4_top_nav__right_container .align_items_center.display_flex');
+
+  if (!rightContainer) return;
+
+  const btnDiv = document.createElement('div');
+  btnDiv.id = BUTTON_ID;
+  btnDiv.role = 'button';
+  btnDiv.tabIndex = 0;
+  // Style to match Slack header icons somewhat
+  btnDiv.style.cssText = `
+    width: 32px; 
+    height: 32px; 
+    display: flex; 
+    align-items: center; 
+    justify-content: center; 
+    margin-right: 2px; 
+    border-radius: 4px; 
+    cursor: pointer; 
+    color: rgba(255,255,255,0.9);
+    border: 1px solid rgba(255,255,255,0.3);
+    background: rgba(255,255,255,0.1);
+    transition: background 0.1s;
+  `;
+  // "S" Icon
+  btnDiv.innerHTML = `<span style="font-weight:900;font-size:18px;">S</span>`;
+
+  // Hover effect similar to Slack
+  btnDiv.onmouseenter = () => { btnDiv.style.backgroundColor = 'rgba(255,255,255,0.1)'; };
+  btnDiv.onmouseleave = () => { btnDiv.style.backgroundColor = 'transparent'; };
+
+  btnDiv.addEventListener('click', () => {
+    const panel = qs(`#${PANEL_ID}`);
+    if (panel) {
+      const isHidden = panel.style.display === 'none';
+      panel.style.display = isHidden ? 'block' : 'none';
+      if (isHidden) {
+        // Position panel near the button? Or just fixed top right
+        // Let's keep fixed top right as defined in ensurePanel
+      }
+    }
+  });
+
+  // Insert at the beginning of the container (left of ?)
+  if (rightContainer.firstChild) {
+    rightContainer.insertBefore(btnDiv, rightContainer.firstChild);
+  } else {
+    rightContainer.appendChild(btnDiv);
+  }
+}
+
 function ensurePanel() {
+  // Try to insert header button first
+  ensureHeaderButton();
+
   if (qs(`#${PANEL_ID}`)) return;
+
   const panel = document.createElement('div');
   panel.id = PANEL_ID;
-  panel.style.cssText = `position:fixed;bottom:24px;right:24px;z-index:${PANEL_Z_MINIMIZED};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;`;
+  // Fixed positioning, hidden by default
+  panel.style.cssText = `position:fixed;top:48px;right:16px;z-index:${PANEL_Z_EXPANDED};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;display:none;`;
+
   panel.innerHTML = `
     <style>
-      #gslr-expanded { display:none; width:280px; background:#fff; border-radius:14px; box-shadow:0 12px 28px rgba(0,0,0,0.12); padding:14px; }
-      #gslr-min { width:54px; height:54px; border-radius:14px; background:#fff; color:#0f172a; display:flex; align-items:center; justify-content:center; cursor:pointer; box-shadow:0 10px 20px rgba(0,0,0,0.16); border:2px solid transparent; }
-      #gslr-min span { font-weight:800; font-size:24px; }
+      #gslr-expanded { width:280px; background:#fff; border-radius:14px; box-shadow:0 12px 28px rgba(0,0,0,0.12); padding:14px; }
       #gslr-expanded label { display:block; margin:8px 0 4px; font-size:12px; font-weight:700; }
-      #gslr-expanded input, #gslr-expanded select { width:100%; padding:8px; border:1px solid #d1d5db; border-radius:8px; font-size:13px; }
+      #gslr-expanded input, #gslr-expanded select, #gslr-expanded textarea { width:100%; padding:8px; border:1px solid #d1d5db; border-radius:8px; font-size:13px; }
       #gslr-save { width:100%; margin-top:12px; padding:10px; background:#0f172a; color:#fff; border:none; border-radius:10px; font-weight:700; cursor:pointer; }
       .gslr-switch { position:relative; display:inline-block; width:46px; height:26px; margin-right:8px; }
       .gslr-switch input { opacity:0; width:0; height:0; }
@@ -189,7 +362,7 @@ function ensurePanel() {
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div style="font-weight:800;">Gemini Slack Reply</div>
         <button id="gslr-close" style="border:none;background:none;padding:6px;cursor:pointer;line-height:0;">
-          <svg viewBox="0 0 24 24" aria-hidden="true" style="width:20px;height:20px;color:#536471;"><g><path d="M12 15.41l-7.29-7.29 1.41-1.42L12 12.59l5.88-5.89 1.41 1.42L12 15.41z" fill="currentColor"></path></g></svg>
+          <svg viewBox="0 0 24 24" aria-hidden="true" style="width:20px;height:20px;color:#536471;"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="currentColor"></path></svg>
         </button>
       </div>
       <label style="display:flex;align-items:center;gap:6px;">
@@ -204,33 +377,50 @@ function ensurePanel() {
           <span>Out: <b id="gslr-output-chars" style="color:#0f172a;">0</b></span>
         </div>
       </div>
+      <label style="margin-top:10px;">返信の指示 (任意)</label>
+      <textarea id="gslr-instruction" rows="2" placeholder="例: 「丁寧語で」「箇条書きで」など" style="margin-bottom:8px;"></textarea>
+
       <button id="gslr-settings-toggle" style="width:100%; text-align:left; background:none; border:none; padding:0; cursor:pointer; display:flex; align-items:center; gap:6px; color:#10b981; font-weight:700; font-size:13px; margin:8px 0 6px;">
         <span style="font-size:16px;">⚙️</span> 設定 (モデル・キー)
       </button>
       <div id="gslr-settings-content" style="display:none;">
+        <label>自分の表示名 (文脈判定用)</label>
+        <input type="text" id="gslr-my-name" placeholder="Slackの表示名 (例: yamada)" style="margin-bottom:8px;">
+
+        <label>関係性・役割 (任意)</label>
+        <textarea id="gslr-relationships" rows="2" placeholder="フォーマット: 名前:役割:呼び名\n例: 田中:上司:田中部長, 鈴木:同僚:すずさん" style="margin-bottom:8px;"></textarea>
+
+        <label>相手の呼び方 (自動メンション用)</label>
+        <input type="text" id="gslr-honorific" placeholder="例: さん, くん, 様 (デフォルト: さん)" style="margin-bottom:8px;">
+
         <label>モデル</label>
         <select id="gslr-model">
-          <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash-Lite</option>
-          <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-          <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
+          <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite (最安)</option>
+          <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+          <option value="gemini-3-flash-preview">gemini-3-flash-preview (最新)</option>
         </select>
         <label style="margin-top:10px;">Gemini APIキー</label>
         <input type="password" id="gslr-key" placeholder="AI Studio Key">
+        <label style="display:flex;align-items:center;gap:8px;margin-top:10px;">
+          <input type="checkbox" id="gslr-debug">
+          <span>デバッグログを有効化（コンソールに環境情報を出力）</span>
+        </label>
       </div>
       <button id="gslr-save">保存</button>
       <div id="gslr-msg"></div>
-      <div style="margin-top:10px;font-size:12px;color:#6b7280;">もう1件生成: スレッド内でボタン再クリック</div>
     </div>
-    <div id="gslr-min"><span>S</span></div>
   `;
   document.body.appendChild(panel);
 
-  const expanded = qs('#gslr-expanded', panel);
-  const minBtn = qs('#gslr-min', panel);
   const closeBtn = qs('#gslr-close', panel);
   const toggle = qs('#gslr-toggle', panel);
   const modelSel = qs('#gslr-model', panel);
   const keyInput = qs('#gslr-key', panel);
+  const instructionInput = qs('#gslr-instruction', panel);
+  const myNameInput = qs('#gslr-my-name', panel);
+  const relationshipsInput = qs('#gslr-relationships', panel);
+  const honorificInput = qs('#gslr-honorific', panel);
+  const debugInput = qs('#gslr-debug', panel);
   const saveBtn = qs('#gslr-save', panel);
   const msgEl = qs('#gslr-msg', panel);
   const costEl = qs('#gslr-cost', panel);
@@ -239,14 +429,19 @@ function ensurePanel() {
   const settingsToggle = qs('#gslr-settings-toggle', panel);
   const settingsContent = qs('#gslr-settings-content', panel);
 
-  const applyMinBtnStyle = (checked) => {
-    if (!minBtn) return;
+  closeBtn.addEventListener('click', () => {
+    panel.style.display = 'none';
+  });
+
+  const applyBtnStyle = (checked) => {
+    const btn = qs(`#${BUTTON_ID}`);
+    if (!btn) return;
     if (checked) {
-      minBtn.style.borderColor = '#2ecc71';
-      minBtn.style.boxShadow = 'rgba(46, 204, 113, 0.25) 0px 0px 10px, rgba(46, 204, 113, 0.18) 0px 2px 6px 1px';
+      btn.style.opacity = '1';
+      btn.style.filter = 'none';
     } else {
-      minBtn.style.borderColor = 'transparent';
-      minBtn.style.boxShadow = 'rgba(101, 119, 134, 0.2) 0px 0px 8px, rgba(101, 119, 134, 0.2) 0px 2px 5px 1px';
+      btn.style.opacity = '0.6';
+      btn.style.filter = 'grayscale(100%)';
     }
   };
 
@@ -254,40 +449,35 @@ function ensurePanel() {
     toggle.checked = settingsCache.enabled;
     modelSel.value = settingsCache.model;
     keyInput.value = cachedKey;
+    if (instructionInput) instructionInput.value = settingsCache.instruction || '';
+    if (myNameInput) myNameInput.value = settingsCache.myName || '';
+    if (relationshipsInput) relationshipsInput.value = settingsCache.relationships || '';
+    if (honorificInput) honorificInput.value = settingsCache.honorific || 'さん';
+    if (debugInput) debugInput.checked = settingsCache.debug === true;
     updateStatsUI(modelSel.value);
-    applyMinBtnStyle(toggle.checked);
+    applyBtnStyle(toggle.checked);
   }
   syncUI();
-
-  function showExpanded(on) {
-    if (on) {
-      panel.style.zIndex = PANEL_Z_EXPANDED;
-      expanded.style.display = 'block';
-      minBtn.style.display = 'none';
-    } else {
-      panel.style.zIndex = PANEL_Z_MINIMIZED;
-      expanded.style.display = 'none';
-      minBtn.style.display = 'flex';
-    }
-  }
-
-  minBtn.addEventListener('click', () => showExpanded(true));
-  closeBtn.addEventListener('click', () => showExpanded(false));
 
   saveBtn.addEventListener('click', async () => {
     await saveSettings({
       geminiApiKey: keyInput.value.trim(),
       model: modelSel.value,
-      enabled: toggle.checked
+      enabled: toggle.checked,
+      instruction: instructionInput ? instructionInput.value : '',
+      myName: myNameInput ? myNameInput.value : '',
+      relationships: relationshipsInput ? relationshipsInput.value : '',
+      honorific: honorificInput ? honorificInput.value : 'さん',
+      debug: debugInput ? debugInput.checked : false
     });
-    updateStatsUI(modelSel.value);
     msgEl.textContent = '保存しました';
     setTimeout(() => msgEl.textContent = '', 1600);
+    applyBtnStyle(toggle.checked);
   });
 
   toggle.addEventListener('change', async (e) => {
     await saveSettings({ enabled: e.target.checked });
-    applyMinBtnStyle(e.target.checked);
+    applyBtnStyle(e.target.checked);
   });
 
   settingsToggle.addEventListener('click', () => {
@@ -317,61 +507,235 @@ function ensurePanel() {
   }
 }
 
-// ---------- Generation flow ----------
+function ensureInlineButton(pane, composer) {
+  if (composer.dataset.gslrHasButton === 'true') return;
+  const container = composer.closest('.c-wysiwyg_container');
+  const toolbarSuffix = container?.querySelector('.c-wysiwyg_container__suffix');
+  if (!toolbarSuffix) return;
+
+  // Wrapper: mimic c-wysiwyg_container__send_button--with_options
+  const wrapper = document.createElement('div');
+  wrapper.className = 'gslr-btn-group';
+  wrapper.style.cssText = `
+    display: inline-flex;
+    align-items: center;
+    margin-left: 8px;
+    height: 28px; /* Match x-small size */
+    border-radius: 4px;
+    background: #fff;
+    border: 1px solid #d1d5db; /* Default border */
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    position: relative;
+  `;
+
+  // Main Button
+  const mainBtn = document.createElement('button');
+  mainBtn.type = 'button';
+  mainBtn.innerHTML = `
+    <span style="display:flex;align-items:center;gap:4px;">
+      <span style="font-size:14px;">💬</span>
+      <span style="font-weight:700;font-size:13px;padding-top:1px;">AI返信</span>
+    </span>`;
+  mainBtn.style.cssText = `
+    height: 100%;
+    padding: 0 8px 0 8px;
+    border: none;
+    border-right: 1px solid #d1d5db;
+    background: transparent;
+    color: #0f172a;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    transition: background 0.1s;
+  `;
+  mainBtn.onmouseenter = () => mainBtn.style.background = '#f1f5f9';
+  mainBtn.onmouseleave = () => mainBtn.style.background = 'transparent';
+  mainBtn.addEventListener('click', () => {
+    if (!settingsCache.enabled) return;
+    generateForPane(pane, composer, { manual: true }).catch(err => console.error('[gslr]', err));
+  });
+
+  // Dropdown Toggle
+  const toggleBtn = document.createElement('button');
+  toggleBtn.type = 'button';
+  toggleBtn.innerHTML = `<svg viewBox="0 0 20 20" style="width:16px;height:16px;color:#64748b;"><path fill="currentColor" fill-rule="evenodd" d="M5.72 7.47a.75.75 0 0 1 1.06 0L10 10.69l3.22-3.22a.75.75 0 1 1 1.06 1.06l-3.75 3.75a.75.75 0 0 1-1.06 0L5.72 8.53a.75.75 0 0 1 0-1.06" clip-rule="evenodd"></path></svg>`;
+  toggleBtn.style.cssText = `
+    height: 100%;
+    padding: 0 4px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    transition: background 0.1s;
+  `;
+  toggleBtn.onmouseenter = () => toggleBtn.style.background = '#f1f5f9';
+  toggleBtn.onmouseleave = () => toggleBtn.style.background = 'transparent';
+
+  // Dropdown Menu
+  const menu = document.createElement('div');
+  menu.style.cssText = `
+    position: absolute;
+    bottom: 100%;
+    right: 0;
+    margin-bottom: 4px;
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    border-radius: 6px;
+    min-width: 140px;
+    display: none;
+    z-index: 10000;
+    padding: 4px 0;
+  `;
+  const forceBtn = document.createElement('div');
+  forceBtn.textContent = '♻️ 強制再生成';
+  forceBtn.style.cssText = 'padding:8px 12px;font-size:13px;cursor:pointer;color:#334155;font-weight:500;';
+  forceBtn.onmouseenter = () => forceBtn.style.background = '#f8fafc';
+  forceBtn.onmouseleave = () => forceBtn.style.background = 'transparent';
+  forceBtn.addEventListener('click', () => {
+    menu.style.display = 'none';
+    generateForPane(pane, composer, { manual: true, force: true }).catch(err => console.error('[gslr]', err));
+  });
+
+  menu.appendChild(forceBtn);
+  wrapper.appendChild(mainBtn);
+  wrapper.appendChild(toggleBtn);
+  wrapper.appendChild(menu);
+
+  // Toggle Logic
+  toggleBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const isHidden = menu.style.display === 'none';
+    menu.style.display = isHidden ? 'block' : 'none';
+  });
+
+  // Register menu for global close handler
+  activeDropdowns.add(menu);
+
+  toolbarSuffix.appendChild(wrapper);
+  composer.dataset.gslrHasButton = 'true';
+}
+
 function startObserver() {
   if (observing) return;
   observing = true;
+
+  // Immediately try to inject buttons
+  const pane = findThreadPane();
+  if (pane) {
+    const composers = findAllComposers(pane);
+    composers.forEach(composer => ensureInlineButton(pane, composer));
+  }
+
   const observer = new MutationObserver(() => {
     const now = Date.now();
+    ensureHeaderButton();
+
+    // Always check for composers (no debounce for button injection)
+    const pane = findThreadPane();
+    if (pane && pane.dataset.gslrProcessing !== 'true') {
+      const composers = findAllComposers(pane);
+      composers.forEach(composer => ensureInlineButton(pane, composer));
+    }
+
+    // Debounce only for generation logic
     if (now - lastObserverRun < RUN_DEBOUNCE_MS) return;
     lastObserverRun = now;
     if (generationInFlight || cancelFlag) return;
-    const pane = findThreadPane();
-    if (!pane) return;
-    if (pane.dataset.gslrProcessed === 'true') return;
-    if (pane.dataset.gslrProcessing === 'true') return;
-    const composer = findComposer(pane);
-    if (!composer) return;
-    if (composer.dataset.gslrFilled === 'true') return;
-    if (composer.dataset.gslrDone === 'true') return;
-    const tKey = getThreadKey(composer);
-    if (tKey && threadProcessed.has(tKey)) return;
-    if (!settingsCache.enabled) return;
-    generateForPane(pane, composer).catch(err => console.error('[gslr]', err));
   });
   observer.observe(document.body, { childList: true, subtree: true });
 }
 
-async function generateForPane(pane, composer) {
-  pane.dataset.gslrProcessing = 'true';
-  composer.dataset.gslrProcessing = 'true';
-  await loadSettings();
-  if (!cachedKey) {
-    showToast('Gemini APIキーを設定してください');
+// ---------- Logic ----------
+async function generateForPane(pane, composer, opts = {}) {
+  // Respect global toggle even if some path calls this unexpectedly
+  await loadSettings().catch(() => { });
+  if (!settingsCache.enabled && !opts.manual) {
     pane.dataset.gslrProcessing = 'false';
     composer.dataset.gslrProcessing = 'false';
     return;
   }
 
+  const { threadKey, channelId } = getThreadMeta(composer);
+  if (threadLock.has(threadKey)) {
+    if (opts.force) {
+      // Wait a short time for previous run to finish instead of dropping force request
+      const waited = await waitForUnlock(threadKey, 8, 400);
+      if (!waited) {
+        showToast('直前の生成が処理中です。数秒おいて再度お試しください。');
+      }
+    }
+    if (threadLock.has(threadKey)) return;
+  }
+  threadLock.add(threadKey);
   generationInFlight = true;
+
+  pane.dataset.gslrProcessing = 'true';
+  composer.dataset.gslrProcessing = 'true';
+  // loadSettings already done at top; cachedKey set there
+  if (!cachedKey) {
+    showToast('Gemini APIキーを設定してください');
+    pane.dataset.gslrProcessing = 'false';
+    composer.dataset.gslrProcessing = 'false';
+    threadLock.delete(threadKey);
+    generationInFlight = false;
+    return;
+  }
+
   cancelFlag = false;
   setLoading(composer, true);
+
+  if (!opts.manual && normalizeText(composer.innerText).length > 0 && composer.dataset.gslrFilled !== 'true') {
+    setLoading(composer, false);
+    pane.dataset.gslrProcessing = 'false';
+    composer.dataset.gslrProcessing = 'false';
+    threadLock.delete(threadKey);
+    generationInFlight = false;
+    return;
+  }
+
   const messages = await collectMessagesWithRetry(pane, 10);
   if (!messages.length) {
     setLoading(composer, false);
     generationInFlight = false;
     pane.dataset.gslrProcessing = 'false';
     composer.dataset.gslrProcessing = 'false';
+    threadLock.delete(threadKey);
     return;
   }
 
   const context = formatContext(messages);
-  const threadKey = getThreadKey(composer) || 'unknown-thread';
   const contextKey = `${settingsCache.model}::${threadKey}::${context}`;
   const now = Date.now();
+  const latestTsSec = Math.max(...messages.map(m => m.tsSec || 0));
+  const elapsedText = latestTsSec ? formatElapsed(latestTsSec) : '';
+  const channelMeta = detectChannelType(channelId);
+  if (settingsCache.debug) {
+    console.log('[gslr][debug] channel', { channelId, channelType: channelMeta.type, visibility: channelMeta.visibility });
+    console.log('[gslr][debug] latestTsSec', latestTsSec, 'elapsed', elapsedText);
+    console.log('[gslr][debug] messages', messages.slice(-5));
+    console.log('[gslr][debug] context', context);
+  }
 
-  // If the same context was just processed in the last 30s, reuse it to avoid double generation
-  if (lastDraftText && contextKey === lastContextKey && now - lastContextTime < 30000) {
+  // Find reply target
+  let replyTargetName = '';
+  if (messages.length > 0) {
+    // Find the last message that isn't from me
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.sender && m.sender !== 'system' && m.sender !== settingsCache.myName) {
+        replyTargetName = m.sender;
+        break;
+      }
+    }
+  }
+
+  // Relationships are now passed verbatim to the model; it decides呼び名/敬称
+  const parsedRelationships = settingsCache.relationships;
+  const finalHonorific = settingsCache.honorific;
+
+  if (!opts.force && lastDraftText && contextKey === lastContextKey && now - lastContextTime < 30000) {
     const normalizedExisting = (composer.innerText || '').replace(/\s+/g, ' ').trim();
     const normalizedTarget = lastDraftText.replace(/\s+/g, ' ').trim();
     if (!normalizedExisting.includes(normalizedTarget)) {
@@ -382,17 +746,18 @@ async function generateForPane(pane, composer) {
     pane.dataset.gslrProcessed = 'true';
     pane.dataset.gslrProcessing = 'false';
     composer.dataset.gslrProcessing = 'false';
-    showToast('前回のAI返信を再利用しました（Ctrl+Zで取り消し可）', 3000);
+    threadLock.delete(threadKey);
+    showToast('前回のAI返信を再利用しました（強制生成は▼メニューから）', 3000);
     generationInFlight = false;
     return;
   }
 
-  // Cache reuse up to CACHE_TTL_MS
   const cached = replyCache.get(contextKey) || threadDraftMap.get(threadKey);
-  if (cached && now - cached.ts < CACHE_TTL_MS) {
+  if (!opts.force && cached && now - cached.ts < CACHE_TTL_MS) {
     const normalizedExisting = normalizeText(composer.innerText);
     const normalizedTarget = normalizeText(cached.draft || cached);
     if (!normalizedExisting.includes(normalizedTarget)) {
+      composer.innerHTML = '';
       insertText(composer, cached.draft || cached);
     }
     composer.dataset.gslrFilled = 'true';
@@ -400,6 +765,7 @@ async function generateForPane(pane, composer) {
     pane.dataset.gslrProcessed = 'true';
     pane.dataset.gslrProcessing = 'false';
     composer.dataset.gslrProcessing = 'false';
+    threadLock.delete(threadKey);
     showToast('キャッシュ済みAI返信を挿入しました（Ctrl+Zで取り消し可）', 3000);
     generationInFlight = false;
     return;
@@ -413,13 +779,26 @@ async function generateForPane(pane, composer) {
       model: settingsCache.model,
       temperature: FIXED_PARAMS.temperature,
       topP: FIXED_PARAMS.topP,
-      maxTokens: FIXED_PARAMS.maxTokens
+      maxTokens: MODEL_MAX_TOKENS[settingsCache.model] || FIXED_PARAMS.maxTokens,
+      instruction: settingsCache.instruction,
+      myName: settingsCache.myName,
+      relationships: parsedRelationships,
+      replyTarget: replyTargetName,
+      honorific: finalHonorific,
+      channelInfo: { channelId, channelType: channelMeta.type, visibility: channelMeta.visibility },
+      timingInfo: { latestTsSec, latestElapsed: elapsedText }
     }
   };
 
   const res = await new Promise((resolve) => {
-    chrome.runtime.sendMessage(payload, resolve);
-    setTimeout(() => resolve({ success: false, error: 'タイムアウト' }), 9000);
+    try {
+      chrome.runtime.sendMessage(payload, resolve);
+    } catch (e) {
+      resolve({ success: false, error: e.message || 'コンテキストエラー' });
+    }
+    // 大きめmaxTokens時の遅延に備えて少し長めのタイムアウト
+    // 大きめmaxTokens時の遅延に備えて少し長めのタイムアウト
+    setTimeout(() => resolve({ success: false, error: 'タイムアウト' }), 25000);
   });
 
   setLoading(composer, false);
@@ -427,19 +806,35 @@ async function generateForPane(pane, composer) {
   if (cancelFlag) return;
 
   if (!res || !res.success) {
+    if ((res?.error || '').includes('Extension context invalidated')) {
+      threadLock.delete(threadKey);
+      pane.dataset.gslrProcessing = 'false';
+      composer.dataset.gslrProcessing = 'false';
+      return;
+    }
     showToast(res?.error || '生成に失敗しました');
     pane.dataset.gslrProcessing = 'false';
     composer.dataset.gslrProcessing = 'false';
+    threadLock.delete(threadKey);
     return;
   }
 
-  // Avoid duplicate insert if already present
-  const draftWithMark = `${res.data.trim()}\n😊`;
+  const draftWithMark = res.data.trim();
   const existing = normalizeText(composer.innerText);
   const target = normalizeText(draftWithMark);
-  if (composer.dataset.gslrDraft !== target && !existing.includes(target)) {
-    insertText(composer, draftWithMark);
+  const shouldReplace = opts.force || composer.dataset.gslrDraft !== target || !existing.includes(target);
+  let inserted = false;
+  if (shouldReplace) {
+    const ok = replaceTextSafely(composer, draftWithMark);
+    if (!ok) {
+      showToast('AI返信の挿入に失敗しました（復元済み）');
+      threadLock.delete(threadKey);
+      pane.dataset.gslrProcessing = 'false';
+      composer.dataset.gslrProcessing = 'false';
+      return;
+    }
     composer.dataset.gslrDraft = target;
+    inserted = true;
   }
   lastContextKey = contextKey;
   lastContextTime = Date.now();
@@ -453,18 +848,27 @@ async function generateForPane(pane, composer) {
   pane.dataset.gslrProcessed = 'true';
   pane.dataset.gslrProcessing = 'false';
   composer.dataset.gslrProcessing = 'false';
-  showToast('AI返信を挿入しました（Ctrl+Zで取り消し可）', 3000);
+  threadLock.delete(threadKey);
+  if (inserted) {
+    showToast('AI返信を挿入しました（Ctrl+Zで取り消し可）', 3000);
+  } else if (opts.force) {
+    showToast('AI返信は既存内容と同じため変更なしでした', 2500);
+  }
 }
 
 function normalizeText(str) {
   return (str || '').replace(/\s+/g, ' ').trim();
 }
 
-function getThreadKey(composer) {
-  if (!composer) return '';
+function getThreadMeta(composer) {
+  if (!composer) return { threadKey: 'unknown-thread', channelId: '' };
   const container = composer.closest('[data-thread-key]');
-  const key = container?.getAttribute('data-thread-key') || composer.getAttribute('data-thread-key');
-  return key || '';
+  const keyFromAttr = container?.getAttribute('data-thread-key') || composer.getAttribute('data-thread-key');
+  const metaEl = composer.closest('[data-thread-ts]') || composer.closest('[data-qa="message_input"]');
+  const threadTs = metaEl?.getAttribute('data-thread-ts') || metaEl?.getAttribute('data-thread_ts');
+  const channelId = metaEl?.getAttribute('data-channel-id') || metaEl?.getAttribute('data-channel_id') || '';
+  const threadKey = keyFromAttr || (threadTs && channelId ? `${channelId}-${threadTs}` : threadTs ? `thread-${threadTs}` : 'unknown-thread');
+  return { threadKey, channelId };
 }
 
 async function collectMessagesWithRetry(pane, attempts) {
@@ -478,7 +882,6 @@ async function collectMessagesWithRetry(pane, attempts) {
 }
 
 function trimMessages(msgs) {
-  // If too many, keep parent + last 40, summarize middle (placeholder)
   if (msgs.length <= 50) return msgs;
   const parent = msgs[0];
   const tail = msgs.slice(-40);
@@ -493,6 +896,37 @@ function trimMessages(msgs) {
 }
 
 function wait(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function detectChannelType(channelId = '') {
+  if (!channelId) return { type: CHANNEL_TYPE.UNKNOWN, visibility: 'unknown' };
+  const prefix = channelId[0];
+  if (prefix === 'D') return { type: CHANNEL_TYPE.DM, visibility: 'private' };
+  if (prefix === 'E' || prefix === 'F') return { type: CHANNEL_TYPE.MPDM, visibility: 'private' };
+  if (prefix === 'G') return { type: CHANNEL_TYPE.PRIVATE, visibility: 'private' };
+  if (prefix === 'C') return { type: CHANNEL_TYPE.PUBLIC, visibility: 'public' };
+  return { type: CHANNEL_TYPE.UNKNOWN, visibility: 'unknown' };
+}
+
+function formatElapsed(tsSec) {
+  if (!tsSec) return '';
+  const nowSec = Date.now() / 1000;
+  const diff = Math.max(0, nowSec - tsSec);
+  const minutes = Math.floor(diff / 60);
+  if (minutes < 1) return '直近数十秒以内';
+  if (minutes < 60) return `${minutes}分前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}時間前`;
+  const days = Math.floor(hours / 24);
+  return `${days}日前`;
+}
+
+async function waitForUnlock(threadKey, attempts = 6, interval = 300) {
+  while (attempts-- > 0) {
+    await wait(interval);
+    if (!threadLock.has(threadKey)) return true;
+  }
+  return false;
+}
 
 // ---------- Init ----------
 (async function init() {

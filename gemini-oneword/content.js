@@ -8,6 +8,25 @@ const MAX_BATCH_CHARS = 4000;
 const MAX_PARALLEL_REQUESTS = 2;
 const JAPANESE_REGEX = /[ぁ-んァ-ン一-龠]/;
 const CHARS_PER_TOKEN = 4;
+const SHIMMER_STYLE = `
+  @keyframes go-shimmer {
+    0% { background-position: -200px 0; }
+    100% { background-position: 200px 0; }
+  }
+  .go-shimmer {
+    position: relative;
+    color: transparent !important;
+    background: linear-gradient(90deg, #f1f3f4 0%, #e6ecf0 50%, #f1f3f4 100%);
+    background-size: 200px 100%;
+    animation: go-shimmer 1.1s linear infinite;
+    border-radius: 6px;
+  }
+  @keyframes go-flash {
+    0% { background-color: #e8f5fd; }
+    100% { background-color: transparent; }
+  }
+  .go-done { animation: go-flash 0.8s ease; }
+`;
 
 const DEFAULT_MODEL = 'gemini-2.5-flash-lite';
 const MODEL_MIGRATION_KEY = 'geminiModelMigratedTo25FlashLite';
@@ -36,6 +55,7 @@ const summaryCache = new Map();
 const originalTextCache = new Map();
 const summaryByTweetId = new Map();
 const expandedResummarized = new Set();
+let threadSummaryResult = '';
 
 function getTweetTextElements(root) {
   const primary = root.querySelectorAll ? root.querySelectorAll('[data-testid="tweetText"]') : [];
@@ -49,6 +69,73 @@ async function ensureApiKey() {
   const res = await chrome.storage.local.get(['geminiApiKey']);
   cachedApiKey = (res.geminiApiKey || '').trim();
   return cachedApiKey;
+}
+
+function injectShimmerStyleOnce() {
+  if (document.getElementById('go-shimmer-style')) return;
+  const style = document.createElement('style');
+  style.id = 'go-shimmer-style';
+  style.textContent = SHIMMER_STYLE;
+  document.head.appendChild(style);
+}
+
+function createPill(label) {
+  const pill = document.createElement('span');
+  pill.textContent = label;
+  pill.className = 'go-pill';
+  pill.style.cssText = 'display:inline-flex;align-items:center;padding:2px 6px;margin-left:6px;font-size:11px;font-weight:700;border-radius:10px;border:1px solid #cfd9de;color:#1d9bf0;cursor:pointer;user-select:none;';
+  pill.addEventListener('mouseenter', () => pill.style.borderColor = '#1d9bf0');
+  pill.addEventListener('mouseleave', () => pill.style.borderColor = '#cfd9de');
+  return pill;
+}
+
+function ensureBlocks(element) {
+  if (!element.dataset.geminiOnewordHtml) {
+    element.dataset.geminiOnewordHtml = element.innerHTML;
+  }
+  const hasOriginal = element.querySelector('.go-original-block');
+  const hasSummary = element.querySelector('.go-summary-block');
+  if (!hasOriginal || !hasSummary) {
+    const html = element.dataset.geminiOnewordHtml;
+    element.innerHTML = '';
+    const ob = document.createElement('div');
+    ob.className = 'go-original-block';
+    ob.innerHTML = html;
+    const sb = document.createElement('div');
+    sb.className = 'go-summary-block';
+    sb.style.whiteSpace = 'pre-wrap';
+    element.appendChild(ob);
+    element.appendChild(sb);
+  }
+}
+
+function setDisplayMode(element, mode) {
+  const ob = element.querySelector('.go-original-block');
+  const sb = element.querySelector('.go-summary-block');
+  if (!ob || !sb) return;
+  if (mode === 'summary') {
+    ob.style.display = 'none';
+    sb.style.display = 'block';
+  } else {
+    ob.style.display = 'block';
+    sb.style.display = 'none';
+  }
+  element.dataset.geminiOnewordMode = mode;
+}
+
+function setShimmer(element, on) {
+  if (on) {
+    element.classList.add('go-shimmer');
+  } else {
+    element.classList.remove('go-shimmer');
+  }
+}
+
+function flashDone(element) {
+  const sb = element.querySelector('.go-summary-block');
+  if (!sb) return;
+  sb.classList.add('go-done');
+  setTimeout(() => sb.classList.remove('go-done'), 700);
 }
 
 function getCacheKey(text) {
@@ -93,6 +180,7 @@ function createPanel() {
 
   section.innerHTML = `
     <style>
+      ${SHIMMER_STYLE}
       #go-expanded-view {
         transform-origin: top right;
         transition: opacity 220ms ease, transform 260ms cubic-bezier(0.2, 0.9, 0.2, 1);
@@ -223,12 +311,27 @@ function setupPanelLogic(panel) {
     panel.style.setProperty('left', 'auto', 'important');
   };
 
+  const applyResponsiveLayout = (isMinimized) => {
+    const isMobile = window.innerWidth < 768;
+    if (isMobile) {
+      panel.style.width = 'calc(100% - 24px)';
+      panel.style.left = '12px';
+      panel.style.right = '12px';
+      panel.style.top = 'auto';
+      panel.style.bottom = '16px';
+    } else {
+      panel.style.left = 'auto';
+      panel.style.bottom = 'auto';
+      setPanelFixedPosition(`${PANEL_MARGIN.top}px`, `${PANEL_MARGIN.right}px`);
+      panel.style.width = isMinimized ? 'auto' : '300px';
+    }
+  };
+
   const setPanelState = (minimize) => {
     isPanelMinimized = minimize;
+    applyResponsiveLayout(minimize);
     if (minimize) {
       panel.style.zIndex = PANEL_Z_INDEX_MINIMIZED;
-      setPanelFixedPosition(`${PANEL_MARGIN.top}px`, `${PANEL_MARGIN.right}px`);
-      panel.style.width = 'auto';
       expandedView.style.display = 'none';
       expandedView.classList.remove('go-visible');
       expandedView.classList.add('go-hidden');
@@ -289,7 +392,6 @@ function setupPanelLogic(panel) {
     const isHidden = settingsContent.style.display === 'none';
     settingsContent.style.display = isHidden ? 'block' : 'none';
   });
-
 
 
   toggle.addEventListener('change', (e) => {
@@ -403,6 +505,7 @@ function setupPanelLogic(panel) {
     costEl.textContent = '$' + (inCost + outCost).toFixed(5);
   }
   document.addEventListener('mouseup', () => { isDragging = false; });
+  window.addEventListener('resize', () => applyResponsiveLayout(isPanelMinimized));
 }
 
 function requestSummary(texts) {
@@ -466,6 +569,7 @@ async function processQueue() {
 
   const elements = batch.map(item => item.element);
   const texts = batch.map(item => item.text);
+  elements.forEach(el => setShimmer(el, true));
 
   try {
     const result = await requestSummary(texts);
@@ -500,6 +604,7 @@ async function processQueue() {
       }
     });
   } finally {
+    elements.forEach(el => setShimmer(el, false));
     inFlightRequests = Math.max(0, inFlightRequests - 1);
     scheduleProcessing();
   }
@@ -513,33 +618,31 @@ function applySummary(element, summaryText) {
   element.dataset.geminiOnewordOriginal = originalText;
   element.dataset.geminiOnewordSummary = summaryText;
   element.dataset.geminiOnewordMode = 'summary';
+  if (!element.dataset.geminiOnewordHtml) {
+    element.dataset.geminiOnewordHtml = element.innerHTML;
+  }
   if (tweetId) {
     element.dataset.geminiOnewordTweetId = tweetId;
     originalTextCache.set(tweetId, originalText);
     summaryByTweetId.set(tweetId, summaryText);
   }
-
+  ensureBlocks(element);
   renderSummary(element);
 }
 
 function renderSummary(element) {
   const summary = element.dataset.geminiOnewordSummary || '';
-  element.innerHTML = '';
-
-  const summarySpan = document.createElement('span');
-  summarySpan.textContent = summary;
-  summarySpan.style.color = '#0f1419';
-
-  const toggle = document.createElement('span');
-  toggle.textContent = ' 開く';
-  toggle.setAttribute('role', 'button');
-  toggle.style.cursor = 'pointer';
-  toggle.style.color = '#1d9bf0';
-  toggle.style.fontSize = '12px';
-  toggle.style.marginLeft = '6px';
-
-  element.appendChild(summarySpan);
-  element.appendChild(toggle);
+  ensureBlocks(element);
+  const summaryBlock = element.querySelector('.go-summary-block');
+  summaryBlock.textContent = summary;
+  const pill = createPill('開く');
+  pill.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleMode(element);
+  });
+  summaryBlock.appendChild(pill);
+  setDisplayMode(element, 'summary');
+  flashDone(element);
 }
 
 function renderOriginal(element) {
@@ -550,31 +653,26 @@ function renderOriginal(element) {
       original = originalTextCache.get(tweetId) || '';
     }
   }
-  element.innerHTML = '';
-
-  const originalSpan = document.createElement('span');
-  originalSpan.textContent = original;
-
-  const toggle = document.createElement('span');
-  toggle.textContent = ' 元に戻す';
-  toggle.setAttribute('role', 'button');
-  toggle.style.cursor = 'pointer';
-  toggle.style.color = '#1d9bf0';
-  toggle.style.fontSize = '12px';
-  toggle.style.marginLeft = '6px';
-
-  element.appendChild(originalSpan);
-  element.appendChild(toggle);
+  ensureBlocks(element);
+  const originalBlock = element.querySelector('.go-original-block');
+  originalBlock.innerHTML = element.dataset.geminiOnewordHtml || original;
+  const pill = createPill('要約に戻す');
+  pill.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleMode(element);
+  });
+  originalBlock.appendChild(pill);
+  setDisplayMode(element, 'original');
 }
 
 function toggleMode(element) {
   const mode = element.dataset.geminiOnewordMode;
   if (mode === 'summary') {
     element.dataset.geminiOnewordMode = 'original';
-    renderOriginal(element);
+    setDisplayMode(element, 'original');
   } else {
     element.dataset.geminiOnewordMode = 'summary';
-    renderSummary(element);
+    setDisplayMode(element, 'summary');
   }
 }
 
@@ -634,6 +732,7 @@ const observer = new MutationObserver((mutations) => {
 });
 
 function startObserving() {
+  injectShimmerStyleOnce();
   createPanel();
   const target = document.body;
   if (!target) return;
@@ -643,7 +742,7 @@ function startObserving() {
     if (!tweetEl) return;
     if (tweetEl.dataset.geminiOneword !== 'true') return;
 
-    if (e.target && e.target.getAttribute('role') === 'button') {
+    if (e.target && e.target.classList && e.target.classList.contains('go-pill')) {
       e.preventDefault();
       e.stopPropagation();
       toggleMode(tweetEl);
@@ -675,3 +774,17 @@ if (document.readyState === 'loading') {
 } else {
   startObserving();
 }
+
+// Keyboard shortcuts
+document.addEventListener('keydown', (e) => {
+  const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : '';
+  if (tag === 'input' || tag === 'textarea' || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.shiftKey && (e.key === 'O' || e.key === 'o')) {
+    const toggle = document.getElementById('go-toggle');
+    if (toggle) {
+      toggle.checked = !toggle.checked;
+      toggle.dispatchEvent(new Event('change'));
+      e.preventDefault();
+    }
+  }
+});

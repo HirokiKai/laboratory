@@ -9,6 +9,31 @@ const MAX_BATCH_CHARS = 4000;
 const MAX_PARALLEL_REQUESTS = 2;
 const CHARS_PER_TOKEN = 4;
 const JAPANESE_REGEX = /[ぁ-んァ-ン一-龠]/;
+const DIR_EN_JA = 'en_to_ja';
+const DIR_JA_EN = 'ja_to_en';
+
+// Shimmer effect for "translating" state
+const SHIMMER_STYLE = `
+  @keyframes gx-shimmer {
+    0% { background-position: -200px 0; }
+    100% { background-position: 200px 0; }
+  }
+  .gx-shimmer {
+    position: relative;
+    color: transparent !important;
+    background: linear-gradient(90deg, #f1f3f4 0%, #e6ecf0 50%, #f1f3f4 100%);
+    background-size: 200px 100%;
+    animation: gx-shimmer 1.1s linear infinite;
+    border-radius: 6px;
+  }
+  @keyframes gx-flash {
+    0% { background-color: #e8f5fd; }
+    100% { background-color: transparent; }
+  }
+  .gx-done {
+    animation: gx-flash 0.8s ease;
+  }
+`;
 
 const DEFAULT_MODEL = 'gemini-2.5-flash-lite';
 const MODEL_MIGRATION_KEY = 'geminiModelMigratedTo25FlashLite';
@@ -20,6 +45,10 @@ const PRICING = {
     'gemini-3-flash-preview': { input: 0.30, output: 2.50 },
     'default': { input: 0.10, output: 0.40 }
 };
+const API_KEY_REGEX = /^AIza[0-9A-Za-z\-_]{35}$/;
+const TEST_TIMEOUT_MS = 5000;
+const CACHE_LIMIT = 500;
+const validateApiKey = (key) => API_KEY_REGEX.test(key);
 
 // State
 let translationQueue = [];
@@ -31,6 +60,21 @@ const translationCache = new Map();
 const originalTextCache = new Map();
 const translationByTweetId = new Map();
 const expandedRetranslated = new Set();
+let triggerOnboarding = null; // populated inside panel logic
+let translationDirection = DIR_EN_JA;
+
+const isKeyError = (msg = '') => {
+    const m = msg.toLowerCase();
+    return m.includes('api key') || m.includes('permission_denied') || m.includes('invalid api key') || m.includes('request had insufficient authentication');
+};
+const toastQueue = [];
+
+// Panel control hooks (populated after panel init)
+const panelControl = {
+    togglePanel: null,
+    setPanelState: null,
+    getPanelState: null
+};
 
 function getTweetTextElements(root) {
     const primary = root.querySelectorAll ? root.querySelectorAll('[data-testid="tweetText"]') : [];
@@ -91,6 +135,14 @@ function queueRetranslation(element, text) {
     element.dataset.geminiTranslated = 'pending';
     translationQueue.push({ element, text });
     scheduleProcessing();
+}
+
+function pruneCache(map) {
+    while (map.size > CACHE_LIMIT) {
+        const firstKey = map.keys().next().value;
+        if (firstKey !== undefined) map.delete(firstKey);
+        else break;
+    }
 }
 
 // --- Floating Panel UI Construction ---
@@ -154,10 +206,31 @@ function createPanel() {
             <button id="gx-minimize-btn" type="button" style="position: absolute; top: 8px; right: 8px; background: rgba(0,0,0,0.05); border: none; border-radius: 50%; width: 32px; height: 32px; display: flex; justify-content: center; align-items: center; cursor: pointer; transition: background 0.2s; z-index: 1;">
                  ${closeIconSvg}
             </button>
+            <!-- Onboarding Overlay -->
+            <div id="gx-onboard" style="display:none; position:absolute; inset:0; background: rgba(255,255,255,0.98); border-radius:16px; padding:20px 18px 18px 18px; z-index:2; box-shadow: rgba(0,0,0,0.06) 0 8px 30px;">
+                <div style="font-weight:800; font-size:16px; margin-bottom:8px; color:#0f1419;">はじめに</div>
+                <div style="font-size:13px; color:#536471; line-height:1.5; margin-bottom:14px;">GeminiのAPIキーを入力してモデルを選ぶと自動翻訳が始まります。</div>
+                <label style="display:block; font-size:12px; font-weight:700; color:#0f1419; margin-bottom:6px;">API Key</label>
+                <input type="password" id="gx-onboard-key" placeholder="AI Studio Key" style="width:100%; border:1px solid #cfd9de; border-radius:10px; padding:10px 12px; font-size:14px; margin-bottom:14px; outline:none;">
+                <label style="display:block; font-size:12px; font-weight:700; color:#0f1419; margin-bottom:6px;">モデル</label>
+                <select id="gx-onboard-model" style="width:100%; border:1px solid #cfd9de; border-radius:10px; padding:10px 12px; font-size:14px; margin-bottom:18px; background:white; appearance:none; -webkit-appearance:none;">
+                    <option value="gemini-2.0-flash-lite">Gemini 2.0 Flash-Lite</option>
+                    <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+                    <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash-Lite</option>
+                    <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                    <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
+                </select>
+                <button id="gx-onboard-save" style="width:100%; background:#0f1419; color:white; border:none; padding:12px; border-radius:9999px; font-weight:800; cursor:pointer;">保存して開始</button>
+                <div id="gx-onboard-msg" style="font-size:12px; color:#00ba7c; margin-top:8px; min-height:16px;"></div>
+            </div>
             
             <!-- Header -->
             <div id="gx-header" class="css-175oi2r" style="cursor: move; padding: 12px 16px 8px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #eff3f4; min-height: 50px;">
                 <div style="font-weight: 800; font-size: 15px; color: #0f1419;">Gemini Trans</div>
+            </div>
+            <div id="gx-dir-row" style="padding: 8px 16px 4px 16px; border-bottom: 1px solid #eff3f4; display: flex; gap: 8px;">
+                <div id="gx-dir-enja" data-dir="en_to_ja" style="flex:1; text-align:center; padding:8px 10px; border:1px solid #cfd9de; border-radius:10px; font-size:13px; font-weight:700; cursor:pointer; background:#0f1419; color:white;">英 → 日</div>
+                <div id="gx-dir-jaen" data-dir="ja_to_en" style="flex:1; text-align:center; padding:8px 10px; border:1px solid #cfd9de; border-radius:10px; font-size:13px; font-weight:700; cursor:pointer; background:white; color:#0f1419;">日 → 英</div>
             </div>
             
             <!-- Body -->
@@ -266,6 +339,13 @@ function setupPanelLogic(panel) {
     const apiKeyInput = panel.querySelector('#gx-apikey');
     const saveBtn = panel.querySelector('#gx-save');
     const msgEl = panel.querySelector('#gx-msg');
+    const onboard = panel.querySelector('#gx-onboard');
+    const onboardKey = panel.querySelector('#gx-onboard-key');
+    const onboardModel = panel.querySelector('#gx-onboard-model');
+    const onboardSave = panel.querySelector('#gx-onboard-save');
+    const onboardMsg = panel.querySelector('#gx-onboard-msg');
+    const dirEnJaBtn = panel.querySelector('#gx-dir-enja');
+    const dirJaEnBtn = panel.querySelector('#gx-dir-jaen');
 
     // Draggable State
     let expandedPosition = null;
@@ -322,6 +402,11 @@ function setupPanelLogic(panel) {
             });
         }
     };
+
+    // expose for keyboard shortcuts
+    panelControl.togglePanel = () => setPanelState(!isPanelMinimized);
+    panelControl.setPanelState = setPanelState;
+    panelControl.getPanelState = () => isPanelMinimized;
 
     // Minimize Button Handler
     minimizeBtn.addEventListener('click', (e) => {
@@ -398,14 +483,97 @@ function setupPanelLogic(panel) {
     };
     addFocusEffects(apiKeyInput);
     addFocusEffects(modelSelect);
+    addFocusEffects(onboardKey);
+    addFocusEffects(onboardModel);
+
+    // Lightweight toast helper using existing message nodes
+    const setMsg = (el, text, ok = true) => {
+        el.textContent = text;
+        el.style.color = ok ? '#00ba7c' : '#f4212e';
+    };
+
+    const testApiKey = async (key, model) => {
+        // Use low-cost countTokens endpoint for a quick live check
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), TEST_TIMEOUT_MS);
+        try {
+            const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:countTokens?key=${key}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ contents: [{ parts: [{ text: 'ping' }] }] }),
+                signal: controller.signal
+            });
+            clearTimeout(timer);
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                if (resp.status === 403) throw new Error('キーが無効か権限がありません (403)');
+                if (resp.status === 429) throw new Error('リクエスト上限に達しました (429)');
+                throw new Error(err.error?.message || `HTTP ${resp.status}`);
+            }
+        } catch (e) {
+            clearTimeout(timer);
+            if (e.name === 'AbortError') throw new Error('キー確認がタイムアウトしました (5秒)');
+            throw e;
+        }
+    };
+
+    const updateDirUI = (dir) => {
+        const activeStyle = { bg: '#0f1419', color: 'white', border: '#0f1419' };
+        const inactiveStyle = { bg: 'white', color: '#0f1419', border: '#cfd9de' };
+        const apply = (btn, isActive) => {
+            if (!btn) return;
+            btn.style.background = isActive ? activeStyle.bg : inactiveStyle.bg;
+            btn.style.color = isActive ? activeStyle.color : inactiveStyle.color;
+            btn.style.borderColor = isActive ? activeStyle.border : inactiveStyle.border;
+        };
+        apply(dirEnJaBtn, dir === DIR_EN_JA);
+        apply(dirJaEnBtn, dir === DIR_JA_EN);
+    };
+
+    const showOnboarding = (prefillModel) => {
+        // Prefill model choice and keep key empty to encourage fresh input
+        onboardModel.value = prefillModel || DEFAULT_MODEL;
+        onboardKey.value = '';
+        onboardMsg.textContent = '';
+        // Force expanded view to ensure visibility
+        setPanelState(false);
+        expandedView.style.display = 'flex';
+        requestAnimationFrame(() => {
+            onboard.style.display = 'block';
+        });
+    };
+    triggerOnboarding = showOnboarding;
+
+    const hideOnboarding = () => {
+        onboard.style.display = 'none';
+    };
+
+    const resetTranslations = () => {
+        translationCache.clear();
+        translationByTweetId.clear();
+        expandedRetranslated.clear();
+        const translatedEls = document.querySelectorAll('[data-testid="tweetText"][data-gemini-translated], div[lang][data-gemini-translated]');
+        translatedEls.forEach((el) => {
+            if (el.dataset.geminiOriginalHtml) {
+                el.innerHTML = el.dataset.geminiOriginalHtml;
+            }
+            delete el.dataset.geminiTranslated;
+            delete el.dataset.geminiTranslatedOriginal;
+            delete el.dataset.geminiTranslatedText;
+            delete el.dataset.geminiTranslatedMode;
+            delete el.dataset.geminiOriginalHtml;
+            delete el.dataset.geminiTranslatedTweetId;
+        });
+        scanExistingTweets();
+    };
 
 
     // Load State from Storage
-    chrome.storage.local.get(['isAutoTranslateEnabled', 'geminiModel', 'modelStats', 'geminiApiKey', MODEL_MIGRATION_KEY], (res) => {
+    chrome.storage.local.get(['isAutoTranslateEnabled', 'geminiModel', 'modelStats', 'geminiApiKey', 'translationDirection', MODEL_MIGRATION_KEY], (res) => {
         // Toggle
         const isEnabled = res.isAutoTranslateEnabled !== false;
-        toggle.checked = isEnabled;
-        updateToggleStyle(isEnabled);
+        toggle.checked = isEnabled && !!res.geminiApiKey;
+        updateToggleStyle(toggle.checked);
 
         // Stats (Use modelStats now)
         let currentModel = res.geminiModel || DEFAULT_MODEL;
@@ -422,9 +590,16 @@ function setupPanelLogic(panel) {
         modelSelect.value = currentModel;
         if (res.geminiApiKey) apiKeyInput.value = res.geminiApiKey;
         cachedApiKey = (res.geminiApiKey || '').trim();
+        translationDirection = res.translationDirection || DIR_EN_JA;
+        updateDirUI(translationDirection);
 
         // Default to minimized on load (top-right, shifted left)
         setPanelState(true);
+
+        // If no API key yet, guide user with inline onboarding
+        if (!res.geminiApiKey) {
+            showOnboarding(currentModel);
+        }
     });
 
     // Event Listeners
@@ -451,23 +626,82 @@ function setupPanelLogic(panel) {
         settingsContent.style.display = isHidden ? 'block' : 'none';
     });
 
+    const handleDirChange = (dir) => {
+        translationDirection = dir;
+        chrome.storage.local.set({ translationDirection: dir });
+        updateDirUI(dir);
+        resetTranslations();
+    };
+
+    dirEnJaBtn.addEventListener('click', () => handleDirChange(DIR_EN_JA));
+    dirJaEnBtn.addEventListener('click', () => handleDirChange(DIR_JA_EN));
+
     saveBtn.addEventListener('click', () => {
         const key = apiKeyInput.value.trim();
         const model = modelSelect.value;
+        if (!validateApiKey(key)) {
+            setMsg(msgEl, 'APIキーの形式が正しくありません', false);
+            return;
+        }
         saveBtn.textContent = '保存中...';
+        setMsg(msgEl, 'キー確認中...', true);
 
-        chrome.storage.local.set({
-            geminiApiKey: key,
-            geminiModel: model
-        }, () => {
-            cachedApiKey = key;
-            saveBtn.textContent = '保存';
-            msgEl.textContent = '設定を保存しました';
-            // Force stats update
-            chrome.storage.local.get(['modelStats'], (r) => {
-                updateStatsUI(r.modelStats || {}, model);
+        testApiKey(key, model).then(() => {
+            chrome.storage.local.set({
+                geminiApiKey: key,
+                geminiModel: model
+            }, () => {
+                cachedApiKey = key;
+                saveBtn.textContent = '保存';
+                setMsg(msgEl, '設定を保存しました', true);
+                // Force stats update
+                chrome.storage.local.get(['modelStats'], (r) => {
+                    updateStatsUI(r.modelStats || {}, model);
+                });
+                setTimeout(() => { msgEl.textContent = ''; }, 2000);
             });
-            setTimeout(() => { msgEl.textContent = ''; }, 2000);
+        }).catch((err) => {
+            saveBtn.textContent = '保存';
+            setMsg(msgEl, `保存失敗: ${err.message}`, false);
+        });
+    });
+
+    onboardSave.addEventListener('click', () => {
+        const key = onboardKey.value.trim();
+        const model = onboardModel.value;
+        if (!key) {
+            setMsg(onboardMsg, 'APIキーを入力してください', false);
+            return;
+        }
+        if (!validateApiKey(key)) {
+            setMsg(onboardMsg, 'APIキーの形式が正しくありません', false);
+            return;
+        }
+        onboardSave.textContent = '保存中...';
+        setMsg(onboardMsg, 'キー確認中...', true);
+
+        testApiKey(key, model).then(() => {
+            chrome.storage.local.set({
+                geminiApiKey: key,
+                geminiModel: model,
+                isAutoTranslateEnabled: true
+            }, () => {
+                cachedApiKey = key;
+                apiKeyInput.value = key;
+                modelSelect.value = model;
+                toggle.checked = true;
+                updateToggleStyle(true);
+                setMsg(onboardMsg, '設定を保存しました', true);
+                setTimeout(() => {
+                    onboardSave.textContent = '保存して開始';
+                    hideOnboarding();
+                    scanExistingTweets();
+                    processQueue();
+                }, 600);
+            });
+        }).catch((err) => {
+            onboardSave.textContent = '保存して開始';
+            setMsg(onboardMsg, `保存失敗: ${err.message}`, false);
         });
     });
 
@@ -480,6 +714,10 @@ function setupPanelLogic(panel) {
         }
         if (changes.geminiApiKey) {
             cachedApiKey = (changes.geminiApiKey.newValue || '').trim();
+        }
+        if (changes.translationDirection && changes.translationDirection.newValue) {
+            translationDirection = changes.translationDirection.newValue;
+            updateDirUI(translationDirection);
         }
     });
 
@@ -503,23 +741,26 @@ function setupPanelLogic(panel) {
 // --- Translation Logic (Same as before, adapted for Panel) ---
 
 // requestTranslation: Send to background
-function requestTranslation(texts) {
+function requestTranslation(texts, direction) {
     return new Promise((resolve, reject) => {
         chrome.runtime.sendMessage({
             type: 'TRANSLATE_TEXT_BG',
             text: texts.join('\n---SEPARATOR---\n'),
-            targetLang: 'Japanese'
+            direction
         }, (response) => {
             if (chrome.runtime.lastError) {
                 console.warn('[Gemini Trans] Runtime error:', chrome.runtime.lastError.message);
-                resolve(null);
+                resolve({ error: chrome.runtime.lastError.message });
                 return;
             }
             if (response && response.success) {
-                resolve(response.data);
+                resolve({ translation: response.data });
             } else {
                 console.error('[Gemini Trans] API Error:', response?.error);
-                resolve(null);
+                if (response?.error && isKeyError(response.error) && triggerOnboarding) {
+                    triggerOnboarding();
+                }
+                resolve({ error: response?.error || 'Unknown error' });
             }
         });
     });
@@ -557,7 +798,11 @@ async function processQueue() {
         return;
     }
     const apiKey = await ensureApiKey();
-    if (!apiKey) return;
+    if (!apiKey || !validateApiKey(apiKey)) {
+        if (triggerOnboarding) triggerOnboarding();
+        showToast('APIキーを設定または確認してください', 'error');
+        return;
+    }
 
     inFlightRequests += 1;
     const batch = [];
@@ -572,10 +817,12 @@ async function processQueue() {
     const elements = batch.map(item => item.element);
     const texts = batch.map(item => item.text);
 
+    elements.forEach(el => setTranslatingState(el, true));
+
     try {
-        const result = await requestTranslation(texts);
-        if (result) {
-            const translations = result.split(/\n?---SEPARATOR---\n?/);
+        const result = await requestTranslation(texts, translationDirection);
+        if (result.translation) {
+            const translations = result.translation.split(/\n?---SEPARATOR---\n?/);
             elements.forEach((el, index) => {
                 const translatedText = translations[index];
                 if (translatedText) {
@@ -584,8 +831,12 @@ async function processQueue() {
                     translationCache.set(getCacheKey(texts[index]), trimmed);
                 }
             });
-        } else {
-            // Retry once or twice if API returns null
+        } else if (result.error) {
+            const is429 = result.error.includes('429');
+            if (isKeyError(result.error) && triggerOnboarding) {
+                triggerOnboarding();
+            }
+            showToast(`翻訳エラー: ${result.error}`, 'error');
             batch.forEach((item) => {
                 item.retry = (item.retry || 0) + 1;
                 if (item.retry <= 2) {
@@ -594,6 +845,9 @@ async function processQueue() {
                     item.element.dataset.geminiTranslated = 'failed';
                 }
             });
+            const delay = is429 ? 2000 : MIN_TRANSLATION_DELAY_MS;
+            setTimeout(processQueue, delay);
+            return;
         }
     } catch (e) {
         console.error('[Gemini Trans] Batch process failed:', e);
@@ -606,6 +860,7 @@ async function processQueue() {
             }
         });
     } finally {
+        elements.forEach(el => setTranslatingState(el, false));
         inFlightRequests = Math.max(0, inFlightRequests - 1);
         scheduleProcessing();
     }
@@ -613,48 +868,42 @@ async function processQueue() {
 
 function renderTranslation(element) {
     const translated = element.dataset.geminiTranslatedText || '';
-    element.innerHTML = '';
-
-    const translatedSpan = document.createElement('span');
-    translatedSpan.textContent = translated;
-    translatedSpan.style.color = '#1d9bf0';
-
-    element.appendChild(translatedSpan);
+    ensureDualBlocks(element);
+    const translationBlock = element.querySelector('.gx-translation-block');
+    translationBlock.textContent = translated;
+    const pill = createPill('原文');
+    pill.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleMode(element);
+    });
+    translationBlock.appendChild(pill);
+    setDisplayByMode(element, 'translation');
+    flashDone(element);
 }
 
 function renderOriginal(element) {
-    let original = element.dataset.geminiTranslatedOriginal || '';
-    if (!original) {
-        const tweetId = element.dataset.geminiTranslatedTweetId || getTweetId(element);
-        if (tweetId) {
-            original = originalTextCache.get(tweetId) || '';
-        }
-    }
-    element.innerHTML = '';
-
-    const originalSpan = document.createElement('span');
-    originalSpan.textContent = original;
-
-    const toggle = document.createElement('span');
-    toggle.textContent = ' 翻訳に戻す';
-    toggle.setAttribute('role', 'button');
-    toggle.style.cursor = 'pointer';
-    toggle.style.color = '#1d9bf0';
-    toggle.style.fontSize = '12px';
-    toggle.style.marginLeft = '6px';
-
-    element.appendChild(originalSpan);
-    element.appendChild(toggle);
+    ensureDualBlocks(element);
+    const originalBlock = element.querySelector('.gx-original-block');
+    const pill = createPill('翻訳');
+    pill.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleMode(element);
+    });
+    // Keep original markup intact; just ensure pill exists
+    const existingPill = originalBlock.querySelector('.gx-pill');
+    if (existingPill) existingPill.remove();
+    originalBlock.appendChild(pill);
+    setDisplayByMode(element, 'original');
 }
 
 function toggleMode(element) {
     const mode = element.dataset.geminiTranslatedMode;
     if (mode === 'translation') {
         element.dataset.geminiTranslatedMode = 'original';
-        renderOriginal(element);
+        setDisplayByMode(element, 'original');
     } else {
         element.dataset.geminiTranslatedMode = 'translation';
-        renderTranslation(element);
+        setDisplayByMode(element, 'translation');
     }
 }
 
@@ -666,12 +915,113 @@ function applyTranslation(element, translatedText) {
     element.dataset.geminiTranslatedOriginal = originalText;
     element.dataset.geminiTranslatedText = translatedText;
     element.dataset.geminiTranslatedMode = 'translation';
+    if (!element.dataset.geminiOriginalHtml) {
+        element.dataset.geminiOriginalHtml = element.innerHTML;
+    }
     if (tweetId) {
         element.dataset.geminiTranslatedTweetId = tweetId;
         originalTextCache.set(tweetId, originalText);
+        pruneCache(originalTextCache);
         translationByTweetId.set(tweetId, translatedText);
+        pruneCache(translationByTweetId);
     }
+    ensureDualBlocks(element);
     renderTranslation(element);
+    pruneCache(translationCache);
+}
+
+function setTranslatingState(element, isTranslating) {
+    if (isTranslating) {
+        element.dataset.geminiTranslating = 'true';
+        element.classList.add('gx-shimmer');
+    } else {
+        element.dataset.geminiTranslating = 'false';
+        element.classList.remove('gx-shimmer');
+    }
+}
+
+function createPill(label) {
+    const pill = document.createElement('span');
+    pill.textContent = label;
+    pill.style.cssText = 'display:inline-flex;align-items:center;padding:2px 6px;margin-left:6px;font-size:11px;font-weight:700;border-radius:10px;border:1px solid #cfd9de;color:#536471;cursor:pointer;user-select:none;';
+    pill.addEventListener('mouseenter', () => pill.style.borderColor = '#1d9bf0');
+    pill.addEventListener('mouseleave', () => pill.style.borderColor = '#cfd9de');
+    pill.className = 'gx-pill';
+    return pill;
+}
+
+function flashDone(element) {
+    const tb = element.querySelector('.gx-translation-block');
+    if (!tb) return;
+    tb.classList.add('gx-done');
+    setTimeout(() => tb.classList.remove('gx-done'), 700);
+}
+
+function ensureDualBlocks(element) {
+    // Keep original markup intact by separating original and translation blocks
+    if (!element.dataset.geminiOriginalHtml) {
+        element.dataset.geminiOriginalHtml = element.innerHTML;
+    }
+    const hasOriginalBlock = element.querySelector('.gx-original-block');
+    const hasTranslationBlock = element.querySelector('.gx-translation-block');
+    if (!hasOriginalBlock) {
+        const originalBlock = document.createElement('div');
+        originalBlock.className = 'gx-original-block';
+        originalBlock.innerHTML = element.dataset.geminiOriginalHtml;
+        element.innerHTML = '';
+        element.appendChild(originalBlock);
+    }
+    if (!hasTranslationBlock) {
+        const translationBlock = document.createElement('div');
+        translationBlock.className = 'gx-translation-block';
+        translationBlock.style.color = '#1d9bf0';
+        translationBlock.style.whiteSpace = 'pre-wrap';
+        element.appendChild(translationBlock);
+    }
+}
+
+function setDisplayByMode(element, mode) {
+    const ob = element.querySelector('.gx-original-block');
+    const tb = element.querySelector('.gx-translation-block');
+    if (!ob || !tb) return;
+    if (mode === 'original') {
+        ob.style.display = 'block';
+        tb.style.display = 'none';
+    } else {
+        ob.style.display = 'none';
+        tb.style.display = 'block';
+    }
+    element.dataset.geminiTranslatedMode = mode;
+}
+
+function injectShimmerStyleOnce() {
+    if (document.getElementById('gx-shimmer-style')) return;
+    const style = document.createElement('style');
+    style.id = 'gx-shimmer-style';
+    style.textContent = SHIMMER_STYLE;
+    document.head.appendChild(style);
+}
+
+function showToast(message, tone = 'info') {
+    const containerId = 'gx-toast-container';
+    let container = document.getElementById(containerId);
+    if (!container) {
+        container = document.createElement('div');
+        container.id = containerId;
+        container.style.cssText = 'position:fixed;top:12px;right:12px;z-index:2147483646;display:flex;flex-direction:column;gap:8px;font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif;';
+        document.body.appendChild(container);
+    }
+    const toast = document.createElement('div');
+    toast.textContent = message;
+    toast.style.cssText = 'padding:10px 12px;border-radius:10px;box-shadow:rgba(0,0,0,0.12) 0 6px 16px; background:' +
+        (tone === 'error' ? '#ffe6e6' : tone === 'success' ? '#e6ffed' : '#f7f9f9') +
+        '; color:#0f1419; min-width: 200px;';
+    container.appendChild(toast);
+    setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transition = 'opacity 160ms ease';
+        setTimeout(() => toast.remove(), 200);
+    }, 2200);
 }
 
 function checkAndQueue(element) {
@@ -712,7 +1062,12 @@ function checkAndQueue(element) {
         }
     }
     if (element.dataset.geminiTranslated) return;
-    if (JAPANESE_REGEX.test(text)) {
+    const hasJapanese = JAPANESE_REGEX.test(text);
+    if (translationDirection === DIR_EN_JA && hasJapanese) {
+        element.dataset.geminiTranslated = 'skipped';
+        return;
+    }
+    if (translationDirection === DIR_JA_EN && !hasJapanese) {
         element.dataset.geminiTranslated = 'skipped';
         return;
     }
@@ -751,12 +1106,32 @@ const observer = new MutationObserver((mutations) => {
 });
 
 function startObserving() {
+    injectShimmerStyleOnce();
     createPanel(); // Init Panel
     const target = document.body;
     if (!target) return;
     observer.observe(target, { childList: true, subtree: true });
     getTweetTextElements(document).forEach(checkAndQueue);
 }
+
+// Keyboard shortcuts (Shift+J: パネル表示/非表示, Shift+T: 自動翻訳トグル)
+document.addEventListener('keydown', (e) => {
+    const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : '';
+    if (tag === 'input' || tag === 'textarea' || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.shiftKey && (e.key === 'J' || e.key === 'j')) {
+        if (panelControl.togglePanel) {
+            e.preventDefault();
+            panelControl.togglePanel();
+        }
+    }
+    if (e.shiftKey && (e.key === 'T' || e.key === 't')) {
+        const toggle = document.getElementById('gx-toggle');
+        if (toggle) {
+            e.preventDefault();
+            toggle.click();
+        }
+    }
+});
 
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', startObserving);

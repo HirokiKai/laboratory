@@ -3,7 +3,23 @@
 const DEFAULT_MODEL = 'gemini-2.5-flash-lite';
 const MODEL_MIGRATION_KEY = 'geminiModelMigratedTo25FlashLite';
 
-async function translateWithGemini(text, apiKey, modelName = DEFAULT_MODEL) {
+const DIR_EN_JA = 'en_to_ja';
+const DIR_JA_EN = 'ja_to_en';
+
+function buildPrompt(text, direction = DIR_EN_JA) {
+  const target = direction === DIR_JA_EN ? 'English' : 'Japanese';
+  return `You are a professional translator. Translate the following text to ${target}.
+IMPORTANT RULES:
+- Output ONLY the translation.
+- Do NOT provide explanations, notes, or pronunciation guide.
+- Keep the separator "---SEPARATOR---" exactly as is between translation segments.
+- Maintain the same number of segments as the input.
+
+Input Text:
+${text}`;
+}
+
+async function translateWithGemini(text, apiKey, modelName = DEFAULT_MODEL, direction = DIR_EN_JA) {
   if (!apiKey) {
     throw new Error('API Key is missing. Please set it in the extension options.');
   }
@@ -18,24 +34,18 @@ async function translateWithGemini(text, apiKey, modelName = DEFAULT_MODEL) {
     body: JSON.stringify({
       contents: [{
         parts: [{
-          text: `You are a professional translator. Translate the following text to Japanese.
-IMPORTANT RULES:
-- Output ONLY the translation.
-- Do NOT provide explanations, notes, or pronunciation guide.
-- Keep the separator "---SEPARATOR---" exactly as is between translation segments.
-- Maintain the same number of segments as the input.
-
-Input Text:
-${text}`
+          text: buildPrompt(text, direction)
         }]
       }]
     })
   });
 
   if (!response.ok) {
-    const errorData = await response.json();
+    const errorData = await response.json().catch(() => ({}));
     console.error('Gemini API Error:', errorData);
-    throw new Error(errorData.error?.message || 'Failed to fetch from Gemini API');
+    const status = response.status;
+    const reason = errorData.error?.message || 'Failed to fetch from Gemini API';
+    throw new Error(`HTTP ${status}: ${reason}`);
   }
 
   const data = await response.json();
@@ -59,6 +69,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           'isAutoTranslateEnabled',
           'statsInputChars',
           'statsOutputChars',
+          'translationDirection',
           MODEL_MIGRATION_KEY
         ]);
 
@@ -77,9 +88,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             [MODEL_MIGRATION_KEY]: true
           });
         }
+        const direction = message.direction || settings.translationDirection || DIR_EN_JA;
 
         // Execute Translation
-        const translation = await translateWithGemini(message.text, apiKey, model);
+        const translation = await translateWithGemini(message.text, apiKey, model, direction);
 
         // Update Stats (Async, no await needed)
         const inputLen = message.text.length;
