@@ -5,18 +5,42 @@ const PANEL_MARGIN = { top: 210, right: 70 };
 const PANEL_Z_INDEX_EXPANDED = 2147483647;
 const PANEL_Z_INDEX_MINIMIZED = 2147483000;
 const CHARS_PER_TOKEN = 4;
+const MAX_PROMPT_PATTERNS = 5;
+const DEFAULT_PROMPT_TEMPLATE = `次の投稿内容から{{mode}}してください。\n\n条件:\n- 40〜80文字\n- 観察者の視点で、事実と解釈を分けて\n- 不特定多数に伝わるようにする\n- 出力は本文だけ\n- 前置き、記号、注釈は不要\n\n投稿内容:\n{{text}}`;
 
+const DEFAULT_MODEL = 'gemini-2.5-flash-lite';
+const MODEL_MIGRATION_KEY = 'geminiModelMigratedTo25FlashLite';
 const PRICING = {
   'gemini-2.5-flash-lite': { input: 0.10, output: 0.40 },
   'gemini-2.0-flash-lite': { input: 0.075, output: 0.30 },
   'gemini-2.0-flash': { input: 0.10, output: 0.40 },
   'gemini-2.5-flash': { input: 0.30, output: 2.50 },
   'gemini-3-flash-preview': { input: 0.30, output: 2.50 },
-  'gemini-1.5-flash': { input: 0.075, output: 0.30 },
   'default': { input: 0.10, output: 0.40 }
 };
 
 let isPanelMinimized = true;
+let cachedApiKey = '';
+const draftCache = new Map();
+const pendingDrafts = new Set();
+
+function getTweetTextElements(root) {
+  const primary = root.querySelectorAll ? root.querySelectorAll('[data-testid="tweetText"]') : [];
+  if (primary && primary.length) return Array.from(primary);
+  const fallback = root.querySelectorAll ? root.querySelectorAll('div[lang]') : [];
+  return Array.from(fallback).filter((el) => el.closest && el.closest('article'));
+}
+
+async function ensureApiKey() {
+  if (cachedApiKey) return cachedApiKey;
+  const res = await chrome.storage.local.get(['geminiApiKey']);
+  cachedApiKey = (res.geminiApiKey || '').trim();
+  return cachedApiKey;
+}
+
+function getCacheKey(text, mode) {
+  return `${mode}::${text.trim()}`;
+}
 
 function createPanel() {
   const section = document.createElement('div');
@@ -67,34 +91,23 @@ function createPanel() {
           </div>
         </div>
 
-        <div style="margin-bottom: 15px;">
-          <label style="display: block; font-size: 13px; margin-bottom: 6px; font-weight: 700; color: #0f1419;">視点</label>
-          <input type="text" id="rr-viewpoint" placeholder="例: 翻訳者 / 観察者 / 擁護者 / 研究者" style="width: 100%; border: 1px solid #cfd9de; border-radius: 8px; padding: 10px 12px; font-size: 14px; color: #0f1419; box-sizing: border-box; outline: none; transition: border 0.2s;">
+        <div style="margin-bottom: 12px;">
+          <label style="display: block; font-size: 13px; margin-bottom: 6px; font-weight: 700; color: #0f1419;">プロンプトパターン</label>
+          <select id="rr-pattern-select" style="width: 100%; appearance: none; -webkit-appearance: none; background-color: white; border: 1px solid #cfd9de; border-radius: 8px; padding: 10px 32px 10px 12px; font-size: 14px; color: #0f1419; font-weight: 500; cursor: pointer;"></select>
         </div>
 
-        <div style="margin-bottom: 15px;">
-          <label style="display: block; font-size: 13px; margin-bottom: 6px; font-weight: 700; color: #0f1419;">伝える相手</label>
-          <input type="text" id="rr-audience" placeholder="例: 初見の人 / 反対者 / 社内 / 未来の自分" style="width: 100%; border: 1px solid #cfd9de; border-radius: 8px; padding: 10px 12px; font-size: 14px; color: #0f1419; box-sizing: border-box; outline: none; transition: border 0.2s;">
+        <div style="margin-bottom: 10px;">
+          <label style="display: block; font-size: 13px; margin-bottom: 6px; font-weight: 700; color: #0f1419;">パターン名</label>
+          <input type="text" id="rr-pattern-name" placeholder="例: デフォルト / 断定控えめ" style="width: 100%; border: 1px solid #cfd9de; border-radius: 8px; padding: 10px 12px; font-size: 14px; color: #0f1419; box-sizing: border-box; outline: none; transition: border 0.2s;">
         </div>
 
-        <div style="margin-bottom: 15px;">
-          <label style="display: block; font-size: 13px; margin-bottom: 6px; font-weight: 700; color: #0f1419;">長さ</label>
-          <select id="rr-length" style="width: 100%; appearance: none; -webkit-appearance: none; background-color: white; border: 1px solid #cfd9de; border-radius: 8px; padding: 10px 32px 10px 12px; font-size: 14px; color: #0f1419; font-weight: 500; cursor: pointer;">
-            <option value="short">短め (20-40)</option>
-            <option value="standard">標準 (40-80)</option>
-            <option value="long">長め (80-140)</option>
-          </select>
+        <div style="margin-bottom: 12px;">
+          <label style="display: block; font-size: 13px; margin-bottom: 6px; font-weight: 700; color: #0f1419;">プロンプト本文</label>
+          <textarea id="rr-pattern-prompt" rows="7" placeholder="ここにプロンプトを入力" style="width: 100%; border: 1px solid #cfd9de; border-radius: 8px; padding: 10px 12px; font-size: 13px; color: #0f1419; box-sizing: border-box; outline: none; transition: border 0.2s; resize: vertical;"></textarea>
+          <div style="font-size: 11px; color: #536471; margin-top: 6px;">{{mode}} と {{text}} が使えます</div>
         </div>
 
-        <div style="margin-bottom: 15px;">
-          <label style="display: block; font-size: 13px; margin-bottom: 6px; font-weight: 700; color: #0f1419;">文章のクセ</label>
-          <input type="text" id="rr-writing-habit" placeholder="例: 断定を避ける / 比喩は使わない / 一文を短く" style="width: 100%; border: 1px solid #cfd9de; border-radius: 8px; padding: 10px 12px; font-size: 14px; color: #0f1419; box-sizing: border-box; outline: none; transition: border 0.2s;">
-        </div>
-
-        <div style="margin-bottom: 15px;">
-          <label style="display: block; font-size: 13px; margin-bottom: 6px; font-weight: 700; color: #0f1419;">禁則ワード</label>
-          <input type="text" id="rr-ban-words" placeholder="例: マジ, やばい, 最強" style="width: 100%; border: 1px solid #cfd9de; border-radius: 8px; padding: 10px 12px; font-size: 14px; color: #0f1419; box-sizing: border-box; outline: none; transition: border 0.2s;">
-        </div>
+        <button id="rr-pattern-add" style="width: 100%; margin-bottom: 12px; background-color: #f7f9f9; color: #0f1419; border: 1px dashed #cfd9de; padding: 10px; border-radius: 10px; cursor: pointer; font-weight: 700; font-size: 13px;">+ 新規パターン</button>
 
         <button id="rr-settings-toggle" style="width: 100%; text-align: left; background: none; border: none; padding: 0; cursor: pointer; display: flex; align-items: center; gap: 6px; color: #2ecc71; font-weight: 600; font-size: 13px;">
           <span style="font-size: 16px;">⚙️</span> 設定 (モデル・キー)
@@ -104,12 +117,23 @@ function createPanel() {
           <div style="margin-bottom: 15px;">
             <label style="display: block; font-size: 13px; margin-bottom: 6px; font-weight: 700; color: #0f1419;">モデル</label>
             <select id="rr-model" style="width: 100%; appearance: none; -webkit-appearance: none; background-color: white; border: 1px solid #cfd9de; border-radius: 8px; padding: 10px 32px 10px 12px; font-size: 14px; color: #0f1419; font-weight: 500; cursor: pointer;">
-              <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash-Lite</option>
-              <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
               <option value="gemini-2.0-flash-lite">Gemini 2.0 Flash-Lite</option>
+              <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+              <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash-Lite</option>
               <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
               <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
             </select>
+          </div>
+          <div style="margin: 0 0 15px 0; padding: 10px 12px; border: 1px solid #eff3f4; border-radius: 10px; background-color: #f7f9f9;">
+            <div style="font-size: 11px; font-weight: 700; color: #536471; margin-bottom: 6px;">モデル料金 (USD / 1M tokens)</div>
+            <div style="display: grid; grid-template-columns: 1fr auto auto; column-gap: 8px; row-gap: 4px; font-size: 11px; color: #0f1419;">
+              <div style="font-weight: 700;">Model</div><div style="font-weight: 700; text-align: right;">In</div><div style="font-weight: 700; text-align: right;">Out</div>
+              <div>gemini-2.0-flash-lite</div><div style="text-align: right;">$0.075</div><div style="text-align: right;">$0.30</div>
+              <div>gemini-2.0-flash</div><div style="text-align: right;">$0.10</div><div style="text-align: right;">$0.40</div>
+              <div>gemini-2.5-flash-lite</div><div style="text-align: right;">$0.10</div><div style="text-align: right;">$0.40</div>
+              <div>gemini-2.5-flash</div><div style="text-align: right;">$0.30</div><div style="text-align: right;">$2.50</div>
+              <div>gemini-3-flash-preview</div><div style="text-align: right;">$0.30</div><div style="text-align: right;">$2.50</div>
+            </div>
           </div>
 
           <div style="margin-bottom: 20px;">
@@ -141,11 +165,10 @@ function setupPanelLogic(panel) {
   const minimizeBtn = panel.querySelector('#rr-minimize-btn');
   const toggle = panel.querySelector('#rr-toggle');
   const knob = panel.querySelector('#rr-slider-knob');
-  const viewpointSelect = panel.querySelector('#rr-viewpoint');
-  const audienceSelect = panel.querySelector('#rr-audience');
-  const lengthSelect = panel.querySelector('#rr-length');
-  const writingHabitInput = panel.querySelector('#rr-writing-habit');
-  const banWordsInput = panel.querySelector('#rr-ban-words');
+  const patternSelect = panel.querySelector('#rr-pattern-select');
+  const patternNameInput = panel.querySelector('#rr-pattern-name');
+  const patternPromptInput = panel.querySelector('#rr-pattern-prompt');
+  const patternAddBtn = panel.querySelector('#rr-pattern-add');
   const modelSelect = panel.querySelector('#rr-model');
   const apiKeyInput = panel.querySelector('#rr-apikey');
   const saveBtn = panel.querySelector('#rr-save');
@@ -158,6 +181,8 @@ function setupPanelLogic(panel) {
   const minimizedMain = panel.querySelector('#rr-minimize-main');
   let minimizedAnchorRightPx = PANEL_MARGIN.right;
   let minimizedAnchorTopPx = PANEL_MARGIN.top;
+  let promptPatterns = [];
+  let selectedPatternId = '';
 
   const setPanelFixedPosition = (topPx, rightPx) => {
     panel.style.setProperty('top', topPx, 'important');
@@ -225,11 +250,9 @@ function setupPanelLogic(panel) {
   };
   addFocusEffects(apiKeyInput);
   addFocusEffects(modelSelect);
-  addFocusEffects(viewpointSelect);
-  addFocusEffects(audienceSelect);
-  addFocusEffects(lengthSelect);
-  addFocusEffects(writingHabitInput);
-  addFocusEffects(banWordsInput);
+  addFocusEffects(patternSelect);
+  addFocusEffects(patternNameInput);
+  addFocusEffects(patternPromptInput);
 
   minimizeBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -262,41 +285,78 @@ function setupPanelLogic(panel) {
   saveBtn.addEventListener('click', () => {
     const key = apiKeyInput.value.trim();
     const model = modelSelect.value;
-    const viewpoint = viewpointSelect.value.trim();
-    const audience = audienceSelect.value.trim();
-    const length = lengthSelect.value;
-    const writingHabit = writingHabitInput.value.trim();
-    const banWords = banWordsInput.value.trim();
+    const name = patternNameInput.value.trim();
+    const prompt = patternPromptInput.value.trim();
     saveBtn.textContent = '保存中...';
+
+    if (selectedPatternId) {
+      promptPatterns = promptPatterns.map((pattern) => {
+        if (pattern.id !== selectedPatternId) return pattern;
+        return {
+          ...pattern,
+          name: name || pattern.name,
+          prompt: prompt || pattern.prompt
+        };
+      });
+    }
 
     chrome.storage.local.set({
       geminiApiKey: key,
       geminiModel: model,
-      rertViewpoint: viewpoint,
-      rertAudience: audience,
-      rertLength: length,
-      rertWritingHabit: writingHabit,
-      rertBanWords: banWords
+      rertPromptPatterns: promptPatterns,
+      rertSelectedPatternId: selectedPatternId
     }, () => {
+      cachedApiKey = key;
       saveBtn.textContent = '保存';
       msgEl.textContent = '設定を保存しました';
       setTimeout(() => { msgEl.textContent = ''; }, 2000);
+      renderPatternOptions();
     });
   });
 
-  chrome.storage.local.get(['rertEnabled', 'geminiModel', 'geminiApiKey', 'rertViewpoint', 'rertAudience', 'rertLength', 'rertWritingHabit', 'rertBanWords', 'modelStats'], (res) => {
+  chrome.storage.local.get([
+    'rertEnabled',
+    'geminiModel',
+    'geminiApiKey',
+    'rertPromptPatterns',
+    'rertSelectedPatternId',
+    'modelStats',
+    MODEL_MIGRATION_KEY
+  ], (res) => {
     const isEnabled = res.rertEnabled !== false;
     toggle.checked = isEnabled;
     updateToggleStyle(isEnabled);
 
-    const currentModel = res.geminiModel || 'gemini-2.0-flash';
+    let currentModel = res.geminiModel || DEFAULT_MODEL;
+    if (!res[MODEL_MIGRATION_KEY]) {
+      currentModel = DEFAULT_MODEL;
+      chrome.storage.local.set({
+        geminiModel: DEFAULT_MODEL,
+        [MODEL_MIGRATION_KEY]: true
+      });
+    }
     modelSelect.value = currentModel;
     apiKeyInput.value = res.geminiApiKey || '';
-    viewpointSelect.value = res.rertViewpoint || '';
-    audienceSelect.value = res.rertAudience || '';
-    lengthSelect.value = res.rertLength || 'standard';
-    writingHabitInput.value = res.rertWritingHabit || '';
-    banWordsInput.value = res.rertBanWords || '';
+    cachedApiKey = (res.geminiApiKey || '').trim();
+    promptPatterns = Array.isArray(res.rertPromptPatterns) ? res.rertPromptPatterns : [];
+    if (!promptPatterns.length) {
+      const defaultPattern = {
+        id: 'default',
+        name: 'デフォルト',
+        prompt: DEFAULT_PROMPT_TEMPLATE
+      };
+      promptPatterns = [defaultPattern];
+      selectedPatternId = defaultPattern.id;
+      chrome.storage.local.set({
+        rertPromptPatterns: promptPatterns,
+        rertSelectedPatternId: selectedPatternId
+      });
+    } else {
+      selectedPatternId = res.rertSelectedPatternId || promptPatterns[0].id;
+    }
+
+    renderPatternOptions();
+    applySelectedPattern();
     updateStatsUI(res.modelStats || {}, currentModel);
 
     setPanelState(true);
@@ -312,9 +372,41 @@ function setupPanelLogic(panel) {
   chrome.storage.onChanged.addListener((changes) => {
     if (changes.modelStats) {
       chrome.storage.local.get(['modelStats', 'geminiModel'], (r) => {
-        updateStatsUI(r.modelStats || {}, r.geminiModel || 'gemini-2.0-flash');
+        updateStatsUI(r.modelStats || {}, r.geminiModel || DEFAULT_MODEL);
       });
     }
+    if (changes.geminiApiKey) {
+      cachedApiKey = (changes.geminiApiKey.newValue || '').trim();
+    }
+  });
+
+  patternSelect.addEventListener('change', (e) => {
+    selectedPatternId = e.target.value;
+    chrome.storage.local.set({ rertSelectedPatternId: selectedPatternId });
+    applySelectedPattern();
+  });
+
+  patternAddBtn.addEventListener('click', () => {
+    if (promptPatterns.length >= MAX_PROMPT_PATTERNS) {
+      msgEl.textContent = 'パターンは最大5件です';
+      setTimeout(() => { msgEl.textContent = ''; }, 2000);
+      return;
+    }
+    const nextIndex = promptPatterns.length + 1;
+    const newPattern = {
+      id: `pattern-${Date.now()}-${nextIndex}`,
+      name: `新規パターン${nextIndex}`,
+      prompt: DEFAULT_PROMPT_TEMPLATE
+    };
+    promptPatterns.push(newPattern);
+    selectedPatternId = newPattern.id;
+    chrome.storage.local.set({
+      rertPromptPatterns: promptPatterns,
+      rertSelectedPatternId: selectedPatternId
+    }, () => {
+      renderPatternOptions();
+      applySelectedPattern();
+    });
   });
 
   function updateStatsUI(modelStats, modelId) {
@@ -330,6 +422,28 @@ function setupPanelLogic(panel) {
     const outCost = (outChars / CHARS_PER_TOKEN / 1000000) * prices.output;
 
     costEl.textContent = '$' + (inCost + outCost).toFixed(5);
+  }
+
+  function renderPatternOptions() {
+    patternSelect.innerHTML = '';
+    promptPatterns.forEach((pattern) => {
+      const option = document.createElement('option');
+      option.value = pattern.id;
+      option.textContent = pattern.name || '無題';
+      if (pattern.id === selectedPatternId) option.selected = true;
+      patternSelect.appendChild(option);
+    });
+    patternAddBtn.disabled = promptPatterns.length >= MAX_PROMPT_PATTERNS;
+    patternAddBtn.style.opacity = patternAddBtn.disabled ? '0.5' : '1';
+    patternAddBtn.style.cursor = patternAddBtn.disabled ? 'not-allowed' : 'pointer';
+  }
+
+  function applySelectedPattern() {
+    const selected = promptPatterns.find((pattern) => pattern.id === selectedPatternId) || promptPatterns[0];
+    if (!selected) return;
+    selectedPatternId = selected.id;
+    patternNameInput.value = selected.name || '';
+    patternPromptInput.value = selected.prompt || '';
   }
 
   // Drag (expanded only)
@@ -372,7 +486,7 @@ function getComposerTextArea(dialog) {
 
 function getSourceTweetText(dialog) {
   if (!dialog) return '';
-  const texts = Array.from(dialog.querySelectorAll('[data-testid="tweetText"]'));
+  const texts = getTweetTextElements(dialog);
   return texts.map((el) => el.innerText.trim()).filter(Boolean).join('\n');
 }
 
@@ -385,14 +499,21 @@ function detectMode(dialog) {
 }
 
 function insertTextAtEnd(el, text) {
+  if (!el || !el.isConnected) return;
   el.focus();
   const selection = window.getSelection();
   if (selection) {
     const range = document.createRange();
-    range.selectNodeContents(el);
-    range.collapse(false);
-    selection.removeAllRanges();
-    selection.addRange(range);
+    if (el.isConnected) {
+      range.selectNodeContents(el);
+      range.collapse(false);
+      selection.removeAllRanges();
+      try {
+        selection.addRange(range);
+      } catch (e) {
+        // If the node got detached mid-flight, skip range selection.
+      }
+    }
   }
 
   // Try paste event first (closest to manual paste)
@@ -423,14 +544,32 @@ async function generateAndAppendDraft(dialog, textarea) {
   if (textarea.dataset.geminiRertFilled === 'true') return;
   if (dialog.dataset.geminiRertProcessed === 'true') return;
   if (dialog.dataset.geminiRertProcessing === 'true') return;
+  if (!dialog.isConnected || !textarea.isConnected) return;
+  const apiKey = await ensureApiKey();
+  if (!apiKey) return;
   dialog.dataset.geminiRertProcessing = 'true';
 
   let processed = false;
+  let sourceText = '';
   try {
-    const sourceText = getSourceTweetText(dialog);
+    sourceText = getSourceTweetText(dialog);
     if (!sourceText || sourceText.length < 3) return;
 
     const mode = detectMode(dialog);
+    const pendingKey = getCacheKey(sourceText, mode);
+    if (pendingDrafts.has(pendingKey)) return;
+    pendingDrafts.add(pendingKey);
+    const cacheKey = getCacheKey(sourceText, mode);
+    const cached = draftCache.get(cacheKey);
+    if (cached) {
+      const current = (textarea.innerText || '').trim();
+      const prefix = current ? ' ' : '';
+      insertTextAtEnd(textarea, `${prefix}${cached}`);
+      textarea.dataset.geminiRertFilled = 'true';
+      dialog.dataset.geminiRertProcessed = 'true';
+      processed = true;
+      return;
+    }
 
     const response = await new Promise((resolve) => {
       chrome.runtime.sendMessage({
@@ -442,13 +581,19 @@ async function generateAndAppendDraft(dialog, textarea) {
 
     if (!response || !response.success) return;
 
+    if (!dialog.isConnected || !textarea.isConnected) return;
     const current = (textarea.innerText || '').trim();
     const prefix = current ? ' ' : '';
     insertTextAtEnd(textarea, `${prefix}${response.data}`);
+    draftCache.set(cacheKey, response.data);
     textarea.dataset.geminiRertFilled = 'true';
     dialog.dataset.geminiRertProcessed = 'true';
     processed = true;
   } finally {
+    if (sourceText) {
+      const mode = detectMode(dialog);
+      pendingDrafts.delete(getCacheKey(sourceText, mode));
+    }
     if (!processed) {
       dialog.dataset.geminiRertProcessing = 'false';
     } else {

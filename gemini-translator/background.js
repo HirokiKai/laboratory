@@ -1,6 +1,9 @@
 // Background Script - Gemini Translator (Cloud API)
 
-async function translateWithGemini(text, apiKey, modelName = 'gemini-2.0-flash') {
+const DEFAULT_MODEL = 'gemini-2.5-flash-lite';
+const MODEL_MIGRATION_KEY = 'geminiModelMigratedTo25FlashLite';
+
+async function translateWithGemini(text, apiKey, modelName = DEFAULT_MODEL) {
   if (!apiKey) {
     throw new Error('API Key is missing. Please set it in the extension options.');
   }
@@ -50,7 +53,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       try {
         // Get Settings & State
-        const settings = await chrome.storage.local.get(['geminiApiKey', 'geminiModel', 'isAutoTranslateEnabled', 'statsInputChars', 'statsOutputChars']);
+        const settings = await chrome.storage.local.get([
+          'geminiApiKey',
+          'geminiModel',
+          'isAutoTranslateEnabled',
+          'statsInputChars',
+          'statsOutputChars',
+          MODEL_MIGRATION_KEY
+        ]);
 
         // Check if Enabled (Default true)
         if (settings.isAutoTranslateEnabled === false) {
@@ -59,7 +69,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         const apiKey = settings.geminiApiKey;
-        const model = settings.geminiModel || 'gemini-2.0-flash';
+        let model = settings.geminiModel || DEFAULT_MODEL;
+        if (!settings[MODEL_MIGRATION_KEY]) {
+          model = DEFAULT_MODEL;
+          await chrome.storage.local.set({
+            geminiModel: DEFAULT_MODEL,
+            [MODEL_MIGRATION_KEY]: true
+          });
+        }
 
         // Execute Translation
         const translation = await translateWithGemini(message.text, apiKey, model);
@@ -100,4 +117,3 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // Async response
   }
 });
-

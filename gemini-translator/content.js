@@ -6,23 +6,92 @@ const MIN_TRANSLATION_DELAY_MS = 300;
 const MAX_TRANSLATION_DELAY_MS = 1500;
 const MAX_BATCH_SIZE = 12;
 const MAX_BATCH_CHARS = 4000;
+const MAX_PARALLEL_REQUESTS = 2;
 const CHARS_PER_TOKEN = 4;
 const JAPANESE_REGEX = /[ぁ-んァ-ン一-龠]/;
 
+const DEFAULT_MODEL = 'gemini-2.5-flash-lite';
+const MODEL_MIGRATION_KEY = 'geminiModelMigratedTo25FlashLite';
 const PRICING = {
     'gemini-2.5-flash-lite': { input: 0.10, output: 0.40 },
     'gemini-2.0-flash-lite': { input: 0.075, output: 0.30 },
     'gemini-2.0-flash': { input: 0.10, output: 0.40 },
     'gemini-2.5-flash': { input: 0.30, output: 2.50 },
-    'gemini-1.5-flash': { input: 0.075, output: 0.30 }, // Legacy
+    'gemini-3-flash-preview': { input: 0.30, output: 2.50 },
     'default': { input: 0.10, output: 0.40 }
 };
 
 // State
 let translationQueue = [];
-let isProcessingQueue = false;
+let inFlightRequests = 0;
 let scheduledTimerId = null;
 let isPanelMinimized = false;
+let cachedApiKey = '';
+const translationCache = new Map();
+const originalTextCache = new Map();
+const translationByTweetId = new Map();
+const expandedRetranslated = new Set();
+
+function getTweetTextElements(root) {
+    const primary = root.querySelectorAll ? root.querySelectorAll('[data-testid="tweetText"]') : [];
+    if (primary && primary.length) return Array.from(primary);
+    const fallback = root.querySelectorAll ? root.querySelectorAll('div[lang]') : [];
+    return Array.from(fallback).filter((el) => el.closest && el.closest('article'));
+}
+
+async function ensureApiKey() {
+    if (cachedApiKey) return cachedApiKey;
+    const res = await chrome.storage.local.get(['geminiApiKey']);
+    cachedApiKey = (res.geminiApiKey || '').trim();
+    return cachedApiKey;
+}
+
+function getCacheKey(text) {
+    return text.trim();
+}
+
+function getTweetId(element) {
+    const article = element.closest && element.closest('article');
+    if (!article) return '';
+    const link = article.querySelector('a[href*="/status/"]');
+    if (!link) return '';
+    const href = link.getAttribute('href') || '';
+    const match = href.match(/status\/(\d+)/);
+    return match ? match[1] : '';
+}
+
+// Expand truncated tweets ("Show more") before translating so we don't lose trailing text
+function expandIfTruncated(element) {
+    // Twitter/X adds a small button/link at the end of long tweets
+    const showMore = element.querySelector(
+        '[data-testid="tweet-text-show-more-link"], [data-testid="show-more-link"], div[role="button"][data-testid$="show-more"]'
+    );
+
+    // Only click once per element to avoid loops
+    if (showMore && element.dataset.geminiShowMoreExpanded !== 'true') {
+        element.dataset.geminiShowMoreExpanded = 'true';
+        // Simulate a user click so X loads the remaining text inline
+        showMore.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        // Re-run the queue logic after the DOM updates with full text
+        setTimeout(() => checkAndQueue(element), 250);
+        return true;
+    }
+
+    return false;
+}
+
+function queueRetranslation(element, text) {
+    const tweetId = getTweetId(element);
+    if (tweetId && expandedRetranslated.has(tweetId)) return;
+    if (tweetId) expandedRetranslated.add(tweetId);
+    if (tweetId && text) {
+        originalTextCache.set(tweetId, text);
+        element.dataset.geminiTranslatedOriginal = text;
+    }
+    element.dataset.geminiTranslated = 'pending';
+    translationQueue.push({ element, text });
+    scheduleProcessing();
+}
 
 // --- Floating Panel UI Construction ---
 const PANEL_CLASS_EXPANDED = 'css-175oi2r r-105ug2t r-14lw9ot r-1867qdf r-1upvrn0 r-13awgt0 r-1ce3o0f r-1udh08x r-u8s1d r-13qz1uu';
@@ -126,14 +195,26 @@ function createPanel() {
                         <label style="display: block; font-size: 13px; margin-bottom: 6px; font-weight: 700; color: #0f1419;">モデル</label>
                         <div style="position: relative;">
                             <select id="gx-model" style="width: 100%; appearance: none; -webkit-appearance: none; background-color: white; border: 1px solid #cfd9de; border-radius: 8px; padding: 10px 32px 10px 12px; font-size: 14px; color: #0f1419; font-weight: 500; cursor: pointer;">
-                                <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash-Lite</option>
-                                <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
                                 <option value="gemini-2.0-flash-lite">Gemini 2.0 Flash-Lite</option>
+                                <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+                                <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash-Lite</option>
                                 <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                                <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
                             </select>
                             <div style="position: absolute; right: 12px; top: 50%; transform: translateY(-50%); pointer-events: none; color: #536471;">
                                 <svg viewBox="0 0 24 24" aria-hidden="true" style="width: 16px; height: 16px; fill: currentColor;"><path d="M3.543 8.96l1.414-1.42L12 14.59l7.043-7.05 1.414 1.42L12 17.41 3.543 8.96z"></path></svg>
                             </div>
+                        </div>
+                    </div>
+                    <div style="margin: 0 0 15px 0; padding: 10px 12px; border: 1px solid #eff3f4; border-radius: 10px; background-color: #f7f9f9;">
+                        <div style="font-size: 11px; font-weight: 700; color: #536471; margin-bottom: 6px;">モデル料金 (USD / 1M tokens)</div>
+                        <div style="display: grid; grid-template-columns: 1fr auto auto; column-gap: 8px; row-gap: 4px; font-size: 11px; color: #0f1419;">
+                            <div style="font-weight: 700;">Model</div><div style="font-weight: 700; text-align: right;">In</div><div style="font-weight: 700; text-align: right;">Out</div>
+                            <div>gemini-2.0-flash-lite</div><div style="text-align: right;">$0.075</div><div style="text-align: right;">$0.30</div>
+                            <div>gemini-2.0-flash</div><div style="text-align: right;">$0.10</div><div style="text-align: right;">$0.40</div>
+                            <div>gemini-2.5-flash-lite</div><div style="text-align: right;">$0.10</div><div style="text-align: right;">$0.40</div>
+                            <div>gemini-2.5-flash</div><div style="text-align: right;">$0.30</div><div style="text-align: right;">$2.50</div>
+                            <div>gemini-3-flash-preview</div><div style="text-align: right;">$0.30</div><div style="text-align: right;">$2.50</div>
                         </div>
                     </div>
 
@@ -320,19 +401,27 @@ function setupPanelLogic(panel) {
 
 
     // Load State from Storage
-    chrome.storage.local.get(['isAutoTranslateEnabled', 'geminiModel', 'modelStats', 'geminiApiKey'], (res) => {
+    chrome.storage.local.get(['isAutoTranslateEnabled', 'geminiModel', 'modelStats', 'geminiApiKey', MODEL_MIGRATION_KEY], (res) => {
         // Toggle
         const isEnabled = res.isAutoTranslateEnabled !== false;
         toggle.checked = isEnabled;
         updateToggleStyle(isEnabled);
 
         // Stats (Use modelStats now)
-        const currentModel = res.geminiModel || 'gemini-2.0-flash';
+        let currentModel = res.geminiModel || DEFAULT_MODEL;
+        if (!res[MODEL_MIGRATION_KEY]) {
+            currentModel = DEFAULT_MODEL;
+            chrome.storage.local.set({
+                geminiModel: DEFAULT_MODEL,
+                [MODEL_MIGRATION_KEY]: true
+            });
+        }
         updateStatsUI(res.modelStats || {}, currentModel);
 
         // Settings
         modelSelect.value = currentModel;
         if (res.geminiApiKey) apiKeyInput.value = res.geminiApiKey;
+        cachedApiKey = (res.geminiApiKey || '').trim();
 
         // Default to minimized on load (top-right, shifted left)
         setPanelState(true);
@@ -371,6 +460,7 @@ function setupPanelLogic(panel) {
             geminiApiKey: key,
             geminiModel: model
         }, () => {
+            cachedApiKey = key;
             saveBtn.textContent = '保存';
             msgEl.textContent = '設定を保存しました';
             // Force stats update
@@ -385,8 +475,11 @@ function setupPanelLogic(panel) {
     chrome.storage.onChanged.addListener((changes) => {
         if (changes.modelStats) {
             chrome.storage.local.get(['modelStats', 'geminiModel'], (r) => {
-                updateStatsUI(r.modelStats || {}, r.geminiModel || 'gemini-2.0-flash');
+                updateStatsUI(r.modelStats || {}, r.geminiModel || DEFAULT_MODEL);
             });
+        }
+        if (changes.geminiApiKey) {
+            cachedApiKey = (changes.geminiApiKey.newValue || '').trim();
         }
     });
 
@@ -435,13 +528,16 @@ function requestTranslation(texts) {
 // Process Queue
 function scheduleProcessing() {
     if (scheduledTimerId) return;
-    if (isProcessingQueue || translationQueue.length === 0) return;
+    if (translationQueue.length === 0) return;
+    if (inFlightRequests >= MAX_PARALLEL_REQUESTS) return;
 
     const queueSize = translationQueue.length;
-    const delay = Math.max(
-        MIN_TRANSLATION_DELAY_MS,
-        Math.min(MAX_TRANSLATION_DELAY_MS, MIN_TRANSLATION_DELAY_MS + queueSize * 40)
-    );
+    const delay = queueSize <= 2
+        ? 0
+        : Math.max(
+            MIN_TRANSLATION_DELAY_MS,
+            Math.min(MAX_TRANSLATION_DELAY_MS, MIN_TRANSLATION_DELAY_MS + queueSize * 40)
+        );
 
     scheduledTimerId = setTimeout(() => {
         scheduledTimerId = null;
@@ -450,17 +546,20 @@ function scheduleProcessing() {
 }
 
 async function processQueue() {
-    if (isProcessingQueue || translationQueue.length === 0) return;
+    if (translationQueue.length === 0) return;
+    if (inFlightRequests >= MAX_PARALLEL_REQUESTS) return;
 
     // Check Auto Translate switch from DOM directly (fastest) or storage
     const toggle = document.getElementById('gx-toggle');
     if (toggle && !toggle.checked) {
         // Keep queue but don't process if disabled
-        setTimeout(processQueue, TRANSLATION_DELAY_MS);
+        setTimeout(processQueue, MIN_TRANSLATION_DELAY_MS);
         return;
     }
+    const apiKey = await ensureApiKey();
+    if (!apiKey) return;
 
-    isProcessingQueue = true;
+    inFlightRequests += 1;
     const batch = [];
     let totalChars = 0;
     while (translationQueue.length > 0 && batch.length < MAX_BATCH_SIZE) {
@@ -480,7 +579,9 @@ async function processQueue() {
             elements.forEach((el, index) => {
                 const translatedText = translations[index];
                 if (translatedText) {
-                    applyTranslation(el, translatedText.trim());
+                    const trimmed = translatedText.trim();
+                    applyTranslation(el, trimmed);
+                    translationCache.set(getCacheKey(texts[index]), trimmed);
                 }
             });
         } else {
@@ -505,23 +606,119 @@ async function processQueue() {
             }
         });
     } finally {
-        isProcessingQueue = false;
+        inFlightRequests = Math.max(0, inFlightRequests - 1);
         scheduleProcessing();
     }
 }
 
+function renderTranslation(element) {
+    const translated = element.dataset.geminiTranslatedText || '';
+    element.innerHTML = '';
+
+    const translatedSpan = document.createElement('span');
+    translatedSpan.textContent = translated;
+    translatedSpan.style.color = '#1d9bf0';
+
+    element.appendChild(translatedSpan);
+}
+
+function renderOriginal(element) {
+    let original = element.dataset.geminiTranslatedOriginal || '';
+    if (!original) {
+        const tweetId = element.dataset.geminiTranslatedTweetId || getTweetId(element);
+        if (tweetId) {
+            original = originalTextCache.get(tweetId) || '';
+        }
+    }
+    element.innerHTML = '';
+
+    const originalSpan = document.createElement('span');
+    originalSpan.textContent = original;
+
+    const toggle = document.createElement('span');
+    toggle.textContent = ' 翻訳に戻す';
+    toggle.setAttribute('role', 'button');
+    toggle.style.cursor = 'pointer';
+    toggle.style.color = '#1d9bf0';
+    toggle.style.fontSize = '12px';
+    toggle.style.marginLeft = '6px';
+
+    element.appendChild(originalSpan);
+    element.appendChild(toggle);
+}
+
+function toggleMode(element) {
+    const mode = element.dataset.geminiTranslatedMode;
+    if (mode === 'translation') {
+        element.dataset.geminiTranslatedMode = 'original';
+        renderOriginal(element);
+    } else {
+        element.dataset.geminiTranslatedMode = 'translation';
+        renderTranslation(element);
+    }
+}
+
 function applyTranslation(element, translatedText) {
-    element.style.color = '#1d9bf0';
-    element.innerText = translatedText;
+    const tweetId = getTweetId(element);
+    const cachedOriginal = tweetId ? originalTextCache.get(tweetId) : '';
+    const originalText = cachedOriginal || element.innerText;
     element.dataset.geminiTranslated = 'true';
+    element.dataset.geminiTranslatedOriginal = originalText;
+    element.dataset.geminiTranslatedText = translatedText;
+    element.dataset.geminiTranslatedMode = 'translation';
+    if (tweetId) {
+        element.dataset.geminiTranslatedTweetId = tweetId;
+        originalTextCache.set(tweetId, originalText);
+        translationByTweetId.set(tweetId, translatedText);
+    }
+    renderTranslation(element);
 }
 
 function checkAndQueue(element) {
-    if (element.dataset.geminiTranslated) return;
+    const tweetId = getTweetId(element);
+    // If tweet is truncated, expand first; queue will be retriggered after expansion
+    if (expandIfTruncated(element)) return;
+
+    if (tweetId) {
+        const cachedTranslation = translationByTweetId.get(tweetId);
+        const cachedOriginal = originalTextCache.get(tweetId);
+        const currentText = element.innerText;
+
+        // If we have a cached translation but the visible text grew (e.g., after opening detail view),
+        // retranslate to include the newly revealed part.
+        const needsRetranslate =
+            cachedOriginal &&
+            currentText &&
+            currentText.length > cachedOriginal.length + 2; // allow minor whitespace diffs
+
+        if (needsRetranslate) {
+            queueRetranslation(element, currentText);
+            return;
+        }
+
+        if (cachedTranslation) {
+            applyTranslation(element, cachedTranslation);
+            return;
+        }
+    }
     const text = element.innerText;
     if (!text || text.trim().length < 3) return;
+    if (tweetId) {
+        const cachedOriginal = originalTextCache.get(tweetId);
+        if (cachedOriginal && text !== cachedOriginal) {
+            queueRetranslation(element, text);
+            return;
+        }
+    }
+    if (element.dataset.geminiTranslated) return;
     if (JAPANESE_REGEX.test(text)) {
         element.dataset.geminiTranslated = 'skipped';
+        return;
+    }
+    const cacheKey = getCacheKey(text);
+    const cached = translationCache.get(cacheKey);
+    if (cached) {
+        applyTranslation(element, cached);
         return;
     }
     translationQueue.push({ element, text });
@@ -529,7 +726,7 @@ function checkAndQueue(element) {
 }
 
 function scanExistingTweets() {
-    document.querySelectorAll('[data-testid="tweetText"]').forEach(checkAndQueue);
+    getTweetTextElements(document).forEach(checkAndQueue);
 }
 
 const observer = new MutationObserver((mutations) => {
@@ -538,7 +735,11 @@ const observer = new MutationObserver((mutations) => {
             mutation.addedNodes.forEach((node) => {
                 if (node.nodeType === Node.ELEMENT_NODE) {
                     const tweets = node.querySelectorAll ? node.querySelectorAll('[data-testid="tweetText"]') : [];
-                    tweets.forEach(checkAndQueue);
+                    if (tweets.length) {
+                        tweets.forEach(checkAndQueue);
+                    } else {
+                        getTweetTextElements(node).forEach(checkAndQueue);
+                    }
                     if (node.getAttribute && node.getAttribute('data-testid') === 'tweetText') {
                         checkAndQueue(node);
                     }
@@ -553,7 +754,7 @@ function startObserving() {
     const target = document.body;
     if (!target) return;
     observer.observe(target, { childList: true, subtree: true });
-    document.querySelectorAll('[data-testid="tweetText"]').forEach(checkAndQueue);
+    getTweetTextElements(document).forEach(checkAndQueue);
 }
 
 if (document.readyState === 'loading') {

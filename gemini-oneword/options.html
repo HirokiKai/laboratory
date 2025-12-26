@@ -56,16 +56,36 @@
     <h2>Gemini Oneword Settings</h2>
     <div>
       <label for="apiKey">Gemini API Key:</label>
-      <input type="text" id="apiKey" placeholder="Enter your API Key">
+      <input type="password" id="apiKey" placeholder="Enter your API Key">
     </div>
     <div>
       <label for="modelSelect">Model:</label>
       <select id="modelSelect">
-        <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
         <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash-Lite</option>
-        <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
         <option value="gemini-2.0-flash-lite">Gemini 2.0 Flash-Lite</option>
+        <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+        <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+        <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
       </select>
+    </div>
+    <div>
+      <div style="font-size: 12px; font-weight: bold; margin-bottom: 6px;">Model Pricing (USD per 1M tokens)</div>
+      <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+        <thead>
+          <tr>
+            <th style="text-align: left; border-bottom: 1px solid #e0e0e0; padding: 4px 0;">Model</th>
+            <th style="text-align: right; border-bottom: 1px solid #e0e0e0; padding: 4px 0;">Input</th>
+            <th style="text-align: right; border-bottom: 1px solid #e0e0e0; padding: 4px 0;">Output</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td style="padding: 4px 0;">gemini-2.0-flash-lite</td><td style="text-align: right;">$0.075</td><td style="text-align: right;">$0.30</td></tr>
+          <tr><td style="padding: 4px 0;">gemini-2.0-flash</td><td style="text-align: right;">$0.10</td><td style="text-align: right;">$0.40</td></tr>
+          <tr><td style="padding: 4px 0;">gemini-2.5-flash-lite</td><td style="text-align: right;">$0.10</td><td style="text-align: right;">$0.40</td></tr>
+          <tr><td style="padding: 4px 0;">gemini-2.5-flash</td><td style="text-align: right;">$0.30</td><td style="text-align: right;">$2.50</td></tr>
+          <tr><td style="padding: 4px 0;">gemini-3-flash-preview</td><td style="text-align: right;">$0.30</td><td style="text-align: right;">$2.50</td></tr>
+        </tbody>
+      </table>
     </div>
     <div class="note">
       Get your API key at Google AI Studio

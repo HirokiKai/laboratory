@@ -4,10 +4,10 @@
     "version": "4.0",
     "description": "Auto-translate English tweets on X.com to Japanese using Gemini API.",
     "permissions": [
-        "activeTab",
-        "scripting",
-        "storage",
-        "contextMenus"
+        "storage"
+    ],
+    "host_permissions": [
+        "https://generativelanguage.googleapis.com/*"
     ],
     "background": {
         "service_worker": "background.js"

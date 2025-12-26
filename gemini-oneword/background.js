@@ -1,5 +1,8 @@
 // Background Script - Gemini Oneword
 
+const DEFAULT_MODEL = 'gemini-2.5-flash-lite';
+const MODEL_MIGRATION_KEY = 'geminiModelMigratedTo25FlashLite';
+
 function buildLengthInstruction(length) {
   switch (length) {
     case 'short':
@@ -12,7 +15,7 @@ function buildLengthInstruction(length) {
   }
 }
 
-async function summarizeWithGemini(text, apiKey, modelName = 'gemini-2.0-flash', length = 'standard') {
+async function summarizeWithGemini(text, apiKey, modelName = DEFAULT_MODEL, length = 'standard') {
   if (!apiKey) {
     throw new Error('API Key is missing. Please set it in the extension options.');
   }
@@ -54,7 +57,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'SUMMARIZE_TEXT_BG') {
     (async () => {
       try {
-        const settings = await chrome.storage.local.get(['geminiApiKey', 'geminiModel', 'isOnewordEnabled', 'onewordLength']);
+        const settings = await chrome.storage.local.get([
+          'geminiApiKey',
+          'geminiModel',
+          'isOnewordEnabled',
+          'onewordLength',
+          MODEL_MIGRATION_KEY
+        ]);
 
         if (settings.isOnewordEnabled === false) {
           sendResponse({ success: false, error: 'Summarization disabled by user.' });
@@ -62,7 +71,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         const apiKey = settings.geminiApiKey;
-        const model = settings.geminiModel || 'gemini-2.0-flash';
+        let model = settings.geminiModel || DEFAULT_MODEL;
+        if (!settings[MODEL_MIGRATION_KEY]) {
+          model = DEFAULT_MODEL;
+          await chrome.storage.local.set({
+            geminiModel: DEFAULT_MODEL,
+            [MODEL_MIGRATION_KEY]: true
+          });
+        }
         const length = settings.onewordLength || 'standard';
 
         const summary = await summarizeWithGemini(message.text, apiKey, model, length);

@@ -1,5 +1,8 @@
 // Background Script - Gemini ReRT
 
+const DEFAULT_MODEL = 'gemini-2.5-flash-lite';
+const MODEL_MIGRATION_KEY = 'geminiModelMigratedTo25FlashLite';
+
 function buildLengthInstruction(length) {
   switch (length) {
     case 'short':
@@ -39,20 +42,12 @@ function buildWritingHabitInstruction(writingHabit) {
   return `文章のクセとして「${trimmed}」を守る`;
 }
 
-async function generateWithGemini(text, apiKey, modelName, length, viewpoint, audience, mode, banWordsRaw, writingHabit) {
+async function generateWithGemini(promptText, apiKey, modelName) {
   if (!apiKey) {
     throw new Error('API Key is missing. Please set it in the panel.');
   }
 
   const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
-  const lengthInstruction = buildLengthInstruction(length);
-  const viewpointInstruction = buildViewpointInstruction(viewpoint);
-  const audienceInstruction = buildAudienceInstruction(audience);
-  const banWordsInstruction = buildBanWordsInstruction(banWordsRaw);
-  const writingHabitInstruction = buildWritingHabitInstruction(writingHabit);
-  const modeInstruction = mode === 'reply' ? '返信文を作成' : '引用リツイート文を作成';
-  const banLine = banWordsInstruction ? `\n- ${banWordsInstruction}` : '';
-  const habitLine = writingHabitInstruction ? `\n- ${writingHabitInstruction}` : '';
 
   const response = await fetch(`${API_URL}?key=${apiKey}`, {
     method: 'POST',
@@ -60,7 +55,7 @@ async function generateWithGemini(text, apiKey, modelName, length, viewpoint, au
     body: JSON.stringify({
       contents: [{
         parts: [{
-          text: `次の投稿内容から${modeInstruction}してください。\n\n条件:\n- ${lengthInstruction}\n- ${viewpointInstruction}\n- ${audienceInstruction}${habitLine}${banLine}\n- 出力は本文だけ\n- 前置き、記号、注釈は不要\n\n投稿内容:\n${text}`
+          text: promptText
         }]
       }]
     })
@@ -86,11 +81,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           'geminiApiKey',
           'geminiModel',
           'rertEnabled',
+          'rertPromptPatterns',
+          'rertSelectedPatternId',
           'rertViewpoint',
           'rertAudience',
           'rertLength',
           'rertWritingHabit',
-          'rertBanWords'
+          'rertBanWords',
+          MODEL_MIGRATION_KEY
         ]);
 
         if (settings.rertEnabled === false) {
@@ -99,14 +97,48 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         const apiKey = settings.geminiApiKey;
-        const model = settings.geminiModel || 'gemini-2.0-flash';
+        let model = settings.geminiModel || DEFAULT_MODEL;
+        if (!settings[MODEL_MIGRATION_KEY]) {
+          model = DEFAULT_MODEL;
+          await chrome.storage.local.set({
+            geminiModel: DEFAULT_MODEL,
+            [MODEL_MIGRATION_KEY]: true
+          });
+        }
         const viewpoint = settings.rertViewpoint || '';
         const audience = settings.rertAudience || '';
         const length = settings.rertLength || 'standard';
         const banWordsRaw = settings.rertBanWords || '';
         const writingHabit = settings.rertWritingHabit || '';
+        const modeInstruction = message.mode === 'reply' ? '返信文を作成' : '引用リツイート文を作成';
+        const lengthInstruction = buildLengthInstruction(length);
+        const viewpointInstruction = buildViewpointInstruction(viewpoint);
+        const audienceInstruction = buildAudienceInstruction(audience);
+        const banWordsInstruction = buildBanWordsInstruction(banWordsRaw);
+        const writingHabitInstruction = buildWritingHabitInstruction(writingHabit);
+        const banLine = banWordsInstruction ? `\n- ${banWordsInstruction}` : '';
+        const habitLine = writingHabitInstruction ? `\n- ${writingHabitInstruction}` : '';
 
-        const draft = await generateWithGemini(message.text, apiKey, model, length, viewpoint, audience, message.mode, banWordsRaw, writingHabit);
+        const patterns = Array.isArray(settings.rertPromptPatterns) ? settings.rertPromptPatterns : [];
+        const selectedId = settings.rertSelectedPatternId;
+        const selectedPattern = patterns.find((pattern) => pattern.id === selectedId) || patterns[0];
+        const promptTemplate = selectedPattern && typeof selectedPattern.prompt === 'string'
+          ? selectedPattern.prompt.trim()
+          : '';
+
+        let promptText = '';
+        if (promptTemplate) {
+          promptText = promptTemplate
+            .replace(/{{\s*mode\s*}}/g, modeInstruction)
+            .replace(/{{\s*text\s*}}/g, message.text);
+          if (!/{{\s*text\s*}}/g.test(promptTemplate)) {
+            promptText = `${promptText}\n\n投稿内容:\n${message.text}`;
+          }
+        } else {
+          promptText = `次の投稿内容から${modeInstruction}してください。\n\n条件:\n- ${lengthInstruction}\n- ${viewpointInstruction}\n- ${audienceInstruction}${habitLine}${banLine}\n- 出力は本文だけ\n- 前置き、記号、注釈は不要\n\n投稿内容:\n${message.text}`;
+        }
+
+        const draft = await generateWithGemini(promptText, apiKey, model);
 
         const inputLen = message.text.length;
         const outputLen = draft.length;

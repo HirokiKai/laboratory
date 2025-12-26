@@ -5,15 +5,18 @@ const MIN_DELAY_MS = 300;
 const MAX_DELAY_MS = 1500;
 const MAX_BATCH_SIZE = 12;
 const MAX_BATCH_CHARS = 4000;
+const MAX_PARALLEL_REQUESTS = 2;
 const JAPANESE_REGEX = /[ぁ-んァ-ン一-龠]/;
 const CHARS_PER_TOKEN = 4;
 
+const DEFAULT_MODEL = 'gemini-2.5-flash-lite';
+const MODEL_MIGRATION_KEY = 'geminiModelMigratedTo25FlashLite';
 const PRICING = {
   'gemini-2.5-flash-lite': { input: 0.10, output: 0.40 },
   'gemini-2.0-flash-lite': { input: 0.075, output: 0.30 },
   'gemini-2.0-flash': { input: 0.10, output: 0.40 },
   'gemini-2.5-flash': { input: 0.30, output: 2.50 },
-  'gemini-1.5-flash': { input: 0.075, output: 0.30 },
+  'gemini-3-flash-preview': { input: 0.30, output: 2.50 },
   'default': { input: 0.10, output: 0.40 }
 };
 
@@ -25,9 +28,51 @@ const PANEL_Z_INDEX_EXPANDED = 2147483647;
 const PANEL_Z_INDEX_MINIMIZED = 2147483000;
 
 let summaryQueue = [];
-let isProcessingQueue = false;
+let inFlightRequests = 0;
 let scheduledTimerId = null;
 let isPanelMinimized = true;
+let cachedApiKey = '';
+const summaryCache = new Map();
+const originalTextCache = new Map();
+const summaryByTweetId = new Map();
+const expandedResummarized = new Set();
+
+function getTweetTextElements(root) {
+  const primary = root.querySelectorAll ? root.querySelectorAll('[data-testid="tweetText"]') : [];
+  if (primary && primary.length) return Array.from(primary);
+  const fallback = root.querySelectorAll ? root.querySelectorAll('div[lang]') : [];
+  return Array.from(fallback).filter((el) => el.closest && el.closest('article'));
+}
+
+async function ensureApiKey() {
+  if (cachedApiKey) return cachedApiKey;
+  const res = await chrome.storage.local.get(['geminiApiKey']);
+  cachedApiKey = (res.geminiApiKey || '').trim();
+  return cachedApiKey;
+}
+
+function getCacheKey(text) {
+  return text.trim();
+}
+
+function getTweetId(element) {
+  const article = element.closest && element.closest('article');
+  if (!article) return '';
+  const link = article.querySelector('a[href*="/status/"]');
+  if (!link) return '';
+  const href = link.getAttribute('href') || '';
+  const match = href.match(/\/status\/(\d+)/);
+  return match ? match[1] : '';
+}
+
+function queueResummary(element, text) {
+  const tweetId = getTweetId(element);
+  if (tweetId && expandedResummarized.has(tweetId)) return;
+  if (tweetId) expandedResummarized.add(tweetId);
+  element.dataset.geminiOneword = 'pending';
+  summaryQueue.push({ element, text });
+  scheduleProcessing();
+}
 
 function createPanel() {
   const section = document.createElement('div');
@@ -103,14 +148,26 @@ function createPanel() {
             <label style="display: block; font-size: 13px; margin-bottom: 6px; font-weight: 700; color: #0f1419;">モデル</label>
             <div style="position: relative;">
               <select id="go-model" style="width: 100%; appearance: none; -webkit-appearance: none; background-color: white; border: 1px solid #cfd9de; border-radius: 8px; padding: 10px 32px 10px 12px; font-size: 14px; color: #0f1419; font-weight: 500; cursor: pointer;">
-                <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash-Lite</option>
-                <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
                 <option value="gemini-2.0-flash-lite">Gemini 2.0 Flash-Lite</option>
+                <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+                <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash-Lite</option>
                 <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
               </select>
               <div style="position: absolute; right: 12px; top: 50%; transform: translateY(-50%); pointer-events: none; color: #536471;">
                 <svg viewBox="0 0 24 24" aria-hidden="true" style="width: 16px; height: 16px; fill: currentColor;"><path d="M3.543 8.96l1.414-1.42L12 14.59l7.043-7.05 1.414 1.42L12 17.41 3.543 8.96z"></path></svg>
               </div>
+            </div>
+          </div>
+          <div style="margin: 0 0 15px 0; padding: 10px 12px; border: 1px solid #eff3f4; border-radius: 10px; background-color: #f7f9f9;">
+            <div style="font-size: 11px; font-weight: 700; color: #536471; margin-bottom: 6px;">モデル料金 (USD / 1M tokens)</div>
+            <div style="display: grid; grid-template-columns: 1fr auto auto; column-gap: 8px; row-gap: 4px; font-size: 11px; color: #0f1419;">
+              <div style="font-weight: 700;">Model</div><div style="font-weight: 700; text-align: right;">In</div><div style="font-weight: 700; text-align: right;">Out</div>
+              <div>gemini-2.0-flash-lite</div><div style="text-align: right;">$0.075</div><div style="text-align: right;">$0.30</div>
+              <div>gemini-2.0-flash</div><div style="text-align: right;">$0.10</div><div style="text-align: right;">$0.40</div>
+              <div>gemini-2.5-flash-lite</div><div style="text-align: right;">$0.10</div><div style="text-align: right;">$0.40</div>
+              <div>gemini-2.5-flash</div><div style="text-align: right;">$0.30</div><div style="text-align: right;">$2.50</div>
+              <div>gemini-3-flash-preview</div><div style="text-align: right;">$0.30</div><div style="text-align: right;">$2.50</div>
             </div>
           </div>
 
@@ -256,20 +313,29 @@ function setupPanelLogic(panel) {
       geminiModel: model,
       onewordLength: length
     }, () => {
+      cachedApiKey = key;
       saveBtn.textContent = '保存';
       msgEl.textContent = '設定を保存しました';
       setTimeout(() => { msgEl.textContent = ''; }, 2000);
     });
   });
 
-  chrome.storage.local.get(['isOnewordEnabled', 'geminiModel', 'geminiApiKey', 'onewordLength', 'modelStats'], (res) => {
+  chrome.storage.local.get(['isOnewordEnabled', 'geminiModel', 'geminiApiKey', 'onewordLength', 'modelStats', MODEL_MIGRATION_KEY], (res) => {
     const isEnabled = res.isOnewordEnabled !== false;
     toggle.checked = isEnabled;
     updateToggleStyle(isEnabled);
 
-    const currentModel = res.geminiModel || 'gemini-2.0-flash';
+    let currentModel = res.geminiModel || DEFAULT_MODEL;
+    if (!res[MODEL_MIGRATION_KEY]) {
+      currentModel = DEFAULT_MODEL;
+      chrome.storage.local.set({
+        geminiModel: DEFAULT_MODEL,
+        [MODEL_MIGRATION_KEY]: true
+      });
+    }
     modelSelect.value = currentModel;
     apiKeyInput.value = res.geminiApiKey || '';
+    cachedApiKey = (res.geminiApiKey || '').trim();
     lengthSelect.value = res.onewordLength || 'standard';
     updateStatsUI(res.modelStats || {}, currentModel);
 
@@ -314,8 +380,11 @@ function setupPanelLogic(panel) {
   chrome.storage.onChanged.addListener((changes) => {
     if (changes.modelStats) {
       chrome.storage.local.get(['modelStats', 'geminiModel'], (r) => {
-        updateStatsUI(r.modelStats || {}, r.geminiModel || 'gemini-2.0-flash');
+        updateStatsUI(r.modelStats || {}, r.geminiModel || DEFAULT_MODEL);
       });
+    }
+    if (changes.geminiApiKey) {
+      cachedApiKey = (changes.geminiApiKey.newValue || '').trim();
     }
   });
 
@@ -359,13 +428,16 @@ function requestSummary(texts) {
 
 function scheduleProcessing() {
   if (scheduledTimerId) return;
-  if (isProcessingQueue || summaryQueue.length === 0) return;
+  if (summaryQueue.length === 0) return;
+  if (inFlightRequests >= MAX_PARALLEL_REQUESTS) return;
 
   const queueSize = summaryQueue.length;
-  const delay = Math.max(
-    MIN_DELAY_MS,
-    Math.min(MAX_DELAY_MS, MIN_DELAY_MS + queueSize * 40)
-  );
+  const delay = queueSize <= 2
+    ? 0
+    : Math.max(
+      MIN_DELAY_MS,
+      Math.min(MAX_DELAY_MS, MIN_DELAY_MS + queueSize * 40)
+    );
 
   scheduledTimerId = setTimeout(() => {
     scheduledTimerId = null;
@@ -374,8 +446,13 @@ function scheduleProcessing() {
 }
 
 async function processQueue() {
-  if (isProcessingQueue || summaryQueue.length === 0) return;
-  isProcessingQueue = true;
+  if (summaryQueue.length === 0) return;
+  if (inFlightRequests >= MAX_PARALLEL_REQUESTS) return;
+  const toggle = document.getElementById('go-toggle');
+  if (toggle && !toggle.checked) return;
+  const apiKey = await ensureApiKey();
+  if (!apiKey) return;
+  inFlightRequests += 1;
 
   const batch = [];
   let totalChars = 0;
@@ -397,7 +474,9 @@ async function processQueue() {
       elements.forEach((el, index) => {
         const summaryText = summaries[index];
         if (summaryText) {
-          applySummary(el, summaryText.trim());
+          const trimmed = summaryText.trim();
+          applySummary(el, trimmed);
+          summaryCache.set(getCacheKey(texts[index]), trimmed);
         }
       });
     } else {
@@ -421,17 +500,24 @@ async function processQueue() {
       }
     });
   } finally {
-    isProcessingQueue = false;
+    inFlightRequests = Math.max(0, inFlightRequests - 1);
     scheduleProcessing();
   }
 }
 
 function applySummary(element, summaryText) {
-  const originalText = element.innerText;
+  const tweetId = getTweetId(element);
+  const cachedOriginal = tweetId ? originalTextCache.get(tweetId) : '';
+  const originalText = cachedOriginal || element.innerText;
   element.dataset.geminiOneword = 'true';
   element.dataset.geminiOnewordOriginal = originalText;
   element.dataset.geminiOnewordSummary = summaryText;
   element.dataset.geminiOnewordMode = 'summary';
+  if (tweetId) {
+    element.dataset.geminiOnewordTweetId = tweetId;
+    originalTextCache.set(tweetId, originalText);
+    summaryByTweetId.set(tweetId, summaryText);
+  }
 
   renderSummary(element);
 }
@@ -445,7 +531,7 @@ function renderSummary(element) {
   summarySpan.style.color = '#0f1419';
 
   const toggle = document.createElement('span');
-  toggle.textContent = ' さらに表示';
+  toggle.textContent = ' 開く';
   toggle.setAttribute('role', 'button');
   toggle.style.cursor = 'pointer';
   toggle.style.color = '#1d9bf0';
@@ -457,7 +543,13 @@ function renderSummary(element) {
 }
 
 function renderOriginal(element) {
-  const original = element.dataset.geminiOnewordOriginal || '';
+  let original = element.dataset.geminiOnewordOriginal || '';
+  if (!original) {
+    const tweetId = element.dataset.geminiOnewordTweetId || getTweetId(element);
+    if (tweetId) {
+      original = originalTextCache.get(tweetId) || '';
+    }
+  }
   element.innerHTML = '';
 
   const originalSpan = document.createElement('span');
@@ -488,16 +580,37 @@ function toggleMode(element) {
 
 function checkAndQueue(element) {
   if (element.dataset.geminiOneword === 'true' || element.dataset.geminiOneword === 'failed') return;
+  const tweetId = getTweetId(element);
+  if (tweetId) {
+    const summaryForTweet = summaryByTweetId.get(tweetId);
+    if (summaryForTweet) {
+      applySummary(element, summaryForTweet);
+      return;
+    }
+  }
   const text = element.innerText;
   if (!text || text.trim().length < 5) return;
+  if (tweetId) {
+    const cachedOriginal = originalTextCache.get(tweetId);
+    if (cachedOriginal && text.length > cachedOriginal.length + 10) {
+      queueResummary(element, text);
+      return;
+    }
+  }
   if (!JAPANESE_REGEX.test(text)) return;
+  const cacheKey = getCacheKey(text);
+  const cached = summaryCache.get(cacheKey);
+  if (cached) {
+    applySummary(element, cached);
+    return;
+  }
 
   summaryQueue.push({ element, text });
   scheduleProcessing();
 }
 
 function scanExistingTweets() {
-  document.querySelectorAll('[data-testid="tweetText"]').forEach(checkAndQueue);
+  getTweetTextElements(document).forEach(checkAndQueue);
 }
 
 const observer = new MutationObserver((mutations) => {
@@ -506,7 +619,11 @@ const observer = new MutationObserver((mutations) => {
       mutation.addedNodes.forEach((node) => {
         if (node.nodeType === Node.ELEMENT_NODE) {
           const tweets = node.querySelectorAll ? node.querySelectorAll('[data-testid="tweetText"]') : [];
-          tweets.forEach(checkAndQueue);
+          if (tweets.length) {
+            tweets.forEach(checkAndQueue);
+          } else {
+            getTweetTextElements(node).forEach(checkAndQueue);
+          }
           if (node.getAttribute && node.getAttribute('data-testid') === 'tweetText') {
             checkAndQueue(node);
           }
@@ -533,8 +650,24 @@ function startObserving() {
     }
   });
 
+  document.body.addEventListener('click', (e) => {
+    const targetEl = e.target;
+    if (!targetEl || targetEl.getAttribute('role') !== 'button') return;
+    const label = (targetEl.textContent || '').trim();
+    if (label !== 'さらに表示') return;
+    const tweetEl = targetEl.closest && targetEl.closest('article')?.querySelector('[data-testid="tweetText"]');
+    if (!tweetEl) return;
+    setTimeout(() => {
+      const tweetId = getTweetId(tweetEl);
+      const currentText = tweetEl.innerText || '';
+      const cachedOriginal = tweetId ? (originalTextCache.get(tweetId) || '') : (tweetEl.dataset.geminiOnewordOriginal || '');
+      if (!currentText || currentText.length <= cachedOriginal.length + 5) return;
+      queueResummary(tweetEl, currentText);
+    }, 0);
+  });
+
   observer.observe(target, { childList: true, subtree: true });
-  document.querySelectorAll('[data-testid="tweetText"]').forEach(checkAndQueue);
+  getTweetTextElements(document).forEach(checkAndQueue);
 }
 
 if (document.readyState === 'loading') {
