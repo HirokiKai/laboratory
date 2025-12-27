@@ -1,9 +1,50 @@
 // Content Script - Gemini ReRT (Auto draft for reply/quote)
 console.log('[Gemini ReRT] Loaded.');
 
-const PANEL_MARGIN = { top: 210, right: 70 };
+const PANEL_MARGIN = { expandedTop: 80, expandedRight: 12, minimizedBottom: 60, minimizedRight: 12 };
 const PANEL_Z_INDEX_EXPANDED = 2147483647;
 const PANEL_Z_INDEX_MINIMIZED = 2147483000;
+
+function ensureDock() {
+  let dock = document.getElementById('gemini-dock');
+  if (!dock) {
+    dock = document.createElement('div');
+    dock.id = 'gemini-dock';
+    dock.style.cssText = 'position:fixed; right:16px; top:80px; z-index:2147483600; display:flex; flex-direction:column; gap:12px; align-items:flex-end; pointer-events:none;';
+    document.body.appendChild(dock);
+  }
+  return dock;
+}
+
+function attachToDock(panel, order = 3) {
+  const dock = ensureDock();
+  panel.dataset.gemDockOrder = order;
+  dock.appendChild(panel);
+  Array.from(dock.children)
+    .sort((a, b) => (parseInt(a.dataset.gemDockOrder || '0', 10) - parseInt(b.dataset.gemDockOrder || '0', 10)))
+    .forEach((el) => dock.appendChild(el));
+
+  // Reset styles first to ensure clean slate
+  panel.style.cssText = '';
+
+  // Apply strict styles from standard template
+  panel.style.setProperty('position', 'static', 'important');
+  panel.style.setProperty('width', '56px', 'important');
+  panel.style.setProperty('height', '56px', 'important');
+  panel.style.setProperty('min-width', '56px', 'important');
+  panel.style.setProperty('margin', '0', 'important');
+  panel.style.setProperty('padding', '0', 'important');
+  panel.style.setProperty('box-sizing', 'border-box', 'important');
+  panel.style.setProperty('display', 'block', 'important');
+  panel.style.setProperty('align-self', 'flex-end', 'important');
+  panel.style.setProperty('pointer-events', 'auto', 'important');
+  panel.style.setProperty('z-index', 'auto', 'important');
+  panel.style.setProperty('float', 'none', 'important');
+  panel.style.setProperty('clear', 'none', 'important');
+  panel.style.setProperty('inset', 'auto', 'important');
+
+  dock.style.pointerEvents = 'none';
+}
 const CHARS_PER_TOKEN = 4;
 const MAX_PROMPT_PATTERNS = 5;
 const DEFAULT_PROMPT_TEMPLATE = `次の投稿内容から{{mode}}してください。\n\n条件:\n- 40〜80文字\n- 観察者の視点で、事実と解釈を分けて\n- 不特定多数に伝わるようにする\n- 出力は本文だけ\n- 前置き、記号、注釈は不要\n\n投稿内容:\n{{text}}`;
@@ -82,6 +123,10 @@ function showToast(message, tone = 'info') {
 }
 
 function createPanel() {
+  // Cleanup duplicates first
+  const existing = document.querySelectorAll('[id^="gemini-rert-panel"]');
+  existing.forEach(p => p.remove());
+
   const section = document.createElement('div');
   section.id = 'gemini-rert-panel';
   section.style.cssText = `
@@ -105,30 +150,6 @@ function createPanel() {
       #rr-minimized-view { transform-origin: top right; transition: opacity 180ms ease, transform 220ms cubic-bezier(0.2, 0.9, 0.2, 1); }
       .rr-hidden { opacity: 0; transform: scale(0.92); pointer-events: none; }
       .rr-visible { opacity: 1; transform: scale(1); }
-      .rr-tab-btn {
-        flex:1;
-        display:flex;
-        align-items:center;
-        justify-content:center;
-        padding:12px 10px;
-        border:1.5px solid #d4dce3;
-        background:#fff;
-        cursor:pointer;
-        font-weight:800;
-        font-size:13px;
-        border-radius:14px;
-        color:#0f1419;
-        box-shadow: inset 0 0 0 0 transparent;
-        transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
-      }
-      .rr-tab-btn.active {
-        background:#0f1419;
-        color:#ffffff;
-        border-color:#0f1419;
-        box-shadow: 0 2px 6px rgba(0,0,0,0.18);
-      }
-      .rr-tab-pane { display:none; }
-      .rr-tab-pane.active { display:block; }
     </style>
 
     <div id="rr-expanded-view" class="css-175oi2r r-105ug2t r-14lw9ot r-1867qdf r-1upvrn0 r-13awgt0 r-1ce3o0f r-1udh08x r-u8s1d r-13qz1uu rr-hidden" style="width: 300px; max-height: 80vh; display: none; flex-direction: column; box-shadow: rgba(101, 119, 134, 0.2) 0px 0px 15px, rgba(101, 119, 134, 0.15) 0px 0px 3px 1px; border-radius: 16px; background-color: white; position: relative;">
@@ -137,12 +158,7 @@ function createPanel() {
         <div style="font-weight: 800; font-size: 15px; color: #0f1419;">Gemini ReRT</div>
       </div>
       <div id="rr-body" style="padding: 16px; overflow-y: auto;">
-        <div style="display:flex; gap:8px; margin-bottom:12px;">
-          <button class="rr-tab-btn active" data-tab="gen">生成</button>
-          <button class="rr-tab-btn" data-tab="pattern">パターン</button>
-          <button class="rr-tab-btn" data-tab="settings">設定</button>
-        </div>
-        <div id="rr-tab-gen" class="rr-tab-pane active">
+        <!-- Auto Draft Toggle -->
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
           <span style="font-size: 14px; font-weight: 700; color: #0f1419;">自動下書き</span>
           <label style="position: relative; display: inline-block; width: 44px; height: 24px;">
@@ -152,6 +168,7 @@ function createPanel() {
           </label>
         </div>
 
+        <!-- Stats Card -->
         <div style="background-color: #f7f9f9; padding: 12px 16px; border-radius: 12px; margin-bottom: 20px; border: 1px solid #eff3f4;">
           <div style="font-size: 11px; color: #536471; font-weight: 500;">推定コスト (モデル別目安)</div>
           <div id="rr-cost" style="font-size: 22px; font-weight: 800; color: #0f1419; margin: 4px 0 8px 0;">$0.0000</div>
@@ -160,27 +177,39 @@ function createPanel() {
             <span>Out: <b id="rr-output-chars" style="color: #0f1419;">0</b></span>
           </div>
         </div>
-        </div>
-        <div id="rr-tab-pattern" class="rr-tab-pane">
-        <div style="margin-bottom: 12px;">
-          <label style="display: block; font-size: 13px; margin-bottom: 6px; font-weight: 700; color: #0f1419;">プロンプトパターン</label>
-          <select id="rr-pattern-select" style="width: 100%; appearance: none; -webkit-appearance: none; background-color: white; border: 1px solid #cfd9de; border-radius: 8px; padding: 10px 32px 10px 12px; font-size: 14px; color: #0f1419; font-weight: 500; cursor: pointer;"></select>
+
+        <!-- Pattern Section (Accordion) -->
+        <div>
+            <button id="rr-pattern-toggle" style="width: 100%; text-align: left; background: none; border: none; padding: 0; cursor: pointer; display: flex; align-items: center; gap: 6px; color: #2ecc71; font-weight: 700; font-size: 14px; margin-bottom: 12px;">
+                <span style="font-size: 16px;">✏️</span> プロンプトパターン
+            </button>
+            <div id="rr-pattern-content" style="display: none; margin-bottom: 20px;">
+                <div style="margin-bottom: 12px;">
+                    <label style="display: block; font-size: 13px; margin-bottom: 6px; font-weight: 700; color: #0f1419;">選択</label>
+                    <select id="rr-pattern-select" style="width: 100%; appearance: none; -webkit-appearance: none; background-color: white; border: 1px solid #cfd9de; border-radius: 8px; padding: 10px 32px 10px 12px; font-size: 14px; color: #0f1419; font-weight: 500; cursor: pointer;"></select>
+                </div>
+
+                <div style="margin-bottom: 10px;">
+                    <label style="display: block; font-size: 13px; margin-bottom: 6px; font-weight: 700; color: #0f1419;">パターン名</label>
+                    <input type="text" id="rr-pattern-name" placeholder="例: デフォルト / 断定控えめ" style="width: 100%; border: 1px solid #cfd9de; border-radius: 8px; padding: 10px 12px; font-size: 14px; color: #0f1419; box-sizing: border-box; outline: none; transition: border 0.2s;">
+                </div>
+
+                <div style="margin-bottom: 12px;">
+                    <label style="display: block; font-size: 13px; margin-bottom: 6px; font-weight: 700; color: #0f1419;">プロンプト本文</label>
+                    <textarea id="rr-pattern-prompt" rows="7" placeholder="ここにプロンプトを入力" style="width: 100%; border: 1px solid #cfd9de; border-radius: 8px; padding: 10px 12px; font-size: 13px; color: #0f1419; box-sizing: border-box; outline: none; transition: border 0.2s; resize: vertical;"></textarea>
+                    <div style="font-size: 11px; color: #536471; margin-top: 6px;">{{mode}} と {{text}} が使えます</div>
+                </div>
+
+                <button id="rr-pattern-add" style="width: 100%; margin-bottom: 12px; background-color: #f7f9f9; color: #0f1419; border: 1px dashed #cfd9de; padding: 10px; border-radius: 8px; cursor: pointer; font-weight: 700; font-size: 13px;">+ 新規パターン</button>
+            </div>
         </div>
 
-        <div style="margin-bottom: 10px;">
-          <label style="display: block; font-size: 13px; margin-bottom: 6px; font-weight: 700; color: #0f1419;">パターン名</label>
-          <input type="text" id="rr-pattern-name" placeholder="例: デフォルト / 断定控えめ" style="width: 100%; border: 1px solid #cfd9de; border-radius: 8px; padding: 10px 12px; font-size: 14px; color: #0f1419; box-sizing: border-box; outline: none; transition: border 0.2s;">
-        </div>
+        <!-- Settings Toggle -->
+        <button id="rr-settings-toggle" style="width: 100%; text-align: left; background: none; border: none; padding: 0; cursor: pointer; display: flex; align-items: center; gap: 6px; color: #2ecc71; font-weight: 600; font-size: 13px;">
+          <span style="font-size: 16px;">⚙️</span> 設定 (モデル・キー)
+        </button>
 
-        <div style="margin-bottom: 12px;">
-          <label style="display: block; font-size: 13px; margin-bottom: 6px; font-weight: 700; color: #0f1419;">プロンプト本文</label>
-          <textarea id="rr-pattern-prompt" rows="7" placeholder="ここにプロンプトを入力" style="width: 100%; border: 1px solid #cfd9de; border-radius: 8px; padding: 10px 12px; font-size: 13px; color: #0f1419; box-sizing: border-box; outline: none; transition: border 0.2s; resize: vertical;"></textarea>
-          <div style="font-size: 11px; color: #536471; margin-top: 6px;">{{mode}} と {{text}} が使えます</div>
-        </div>
-
-        <button id="rr-pattern-add" style="width: 100%; margin-bottom: 12px; background-color: #f7f9f9; color: #0f1419; border: 1px dashed #cfd9de; padding: 10px; border-radius: 10px; cursor: pointer; font-weight: 700; font-size: 13px;">+ 新規パターン</button>
-        </div>
-        <div id="rr-tab-settings" class="rr-tab-pane">
+        <div id="rr-settings-content" style="display: none; margin-top: 15px;">
           <div style="margin-bottom: 15px;">
             <label style="display: block; font-size: 13px; margin-bottom: 6px; font-weight: 700; color: #0f1419;">モデル</label>
             <select id="rr-model" style="width: 100%; appearance: none; -webkit-appearance: none; background-color: white; border: 1px solid #cfd9de; border-radius: 8px; padding: 10px 32px 10px 12px; font-size: 14px; color: #0f1419; font-weight: 500; cursor: pointer;">
@@ -191,7 +220,7 @@ function createPanel() {
               <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
             </select>
           </div>
-          <div style="margin: 0 0 15px 0; padding: 10px 12px; border: 1px solid #eff3f4; border-radius: 10px; background-color: #f7f9f9;">
+          <div style="margin: 0 0 15px 0; padding: 10px 12px; border: 1px solid #eff3f4; border-radius: 8px; background-color: #f7f9f9;">
             <div style="font-size: 11px; font-weight: 700; color: #536471; margin-bottom: 6px;">モデル料金 (USD / 1M tokens)</div>
             <div style="display: grid; grid-template-columns: 1fr auto auto; column-gap: 8px; row-gap: 4px; font-size: 11px; color: #0f1419;">
               <div style="font-weight: 700;">Model</div><div style="font-weight: 700; text-align: right;">In</div><div style="font-weight: 700; text-align: right;">Out</div>
@@ -209,13 +238,14 @@ function createPanel() {
           </div>
         </div>
 
+        <!-- Save Button -->
         <button id="rr-save" style="width: 100%; margin-top: 16px; background-color: #0f1419; color: white; border: none; padding: 12px; border-radius: 9999px; cursor: pointer; font-weight: 700; font-size: 14px; transition: background 0.2s;">保存</button>
         <div id="rr-msg" style="text-align: center; font-size: 12px; margin-top: 8px; min-height: 16px; color: #00ba7c;"></div>
       </div>
     </div>
 
     <div id="rr-minimized-view" class="rr-visible" style="display: block; cursor: pointer;">
-      <div id="rr-minimize-main" class="css-175oi2r r-105ug2t r-1867qdf r-1upvrn0 r-13awgt0 r-1ce3o0f r-1udh08x r-u8s1d r-13qz1uu r-173mn98 r-1e5uvyk r-6026j r-1xsrhxi r-rs99b7 r-12jitg0" style="width: 50px; height: 50px; border-radius: 12px; color: #0f1419; box-shadow: rgba(101, 119, 134, 0.2) 0px 0px 8px, rgba(101, 119, 134, 0.25) 0px 1px 3px 1px; border: 2px solid transparent; display: flex; align-items: center; justify-content: center;">
+      <div id="rr-minimize-main" class="css-175oi2r r-105ug2t r-1867qdf r-1upvrn0 r-13awgt0 r-1ce3o0f r-1udh08x r-u8s1d r-13qz1uu r-173mn98 r-1e5uvyk r-6026j r-1xsrhxi r-rs99b7 r-12jitg0" style="width: 56px; height: 56px; border-radius: 12px; color: #0f1419; box-shadow: rgba(101, 119, 134, 0.2) 0px 0px 8px, rgba(101, 119, 134, 0.25) 0px 1px 3px 1px; border: 2px solid transparent; display: flex; align-items: center; justify-content: center;">
         ${rIconSvg}
       </div>
     </div>
@@ -232,16 +262,6 @@ function setupPanelLogic(panel) {
   const minimizeBtn = panel.querySelector('#rr-minimize-btn');
   const toggle = panel.querySelector('#rr-toggle');
   const knob = panel.querySelector('#rr-slider-knob');
-  const tabButtons = Array.from(panel.querySelectorAll('.rr-tab-btn'));
-  const tabPanes = {
-    gen: panel.querySelector('#rr-tab-gen'),
-    pattern: panel.querySelector('#rr-tab-pattern'),
-    settings: panel.querySelector('#rr-tab-settings')
-  };
-  const patternSelect = panel.querySelector('#rr-pattern-select');
-  const patternNameInput = panel.querySelector('#rr-pattern-name');
-  const patternPromptInput = panel.querySelector('#rr-pattern-prompt');
-  const patternAddBtn = panel.querySelector('#rr-pattern-add');
   const modelSelect = panel.querySelector('#rr-model');
   const apiKeyInput = panel.querySelector('#rr-apikey');
   const saveBtn = panel.querySelector('#rr-save');
@@ -250,19 +270,32 @@ function setupPanelLogic(panel) {
   const inputCharsEl = panel.querySelector('#rr-input-chars');
   const outputCharsEl = panel.querySelector('#rr-output-chars');
   const minimizedMain = panel.querySelector('#rr-minimize-main');
+  const settingsToggle = panel.querySelector('#rr-settings-toggle');
+  const settingsContent = panel.querySelector('#rr-settings-content');
+  const patternToggle = panel.querySelector('#rr-pattern-toggle');
+  const patternContent = panel.querySelector('#rr-pattern-content');
+  const patternSelect = panel.querySelector('#rr-pattern-select');
+  const patternNameInput = panel.querySelector('#rr-pattern-name');
+  const patternPromptInput = panel.querySelector('#rr-pattern-prompt');
+  const patternAddBtn = panel.querySelector('#rr-pattern-add');
   let minimizedAnchorRightPx = PANEL_MARGIN.right;
   let minimizedAnchorTopPx = PANEL_MARGIN.top;
   let promptPatterns = [];
   let selectedPatternId = '';
 
-  const setPanelFixedPosition = (topPx, rightPx) => {
-    panel.style.setProperty('top', topPx, 'important');
+  const setPanelFixedPosition = ({ topPx = null, rightPx = '12px', bottomPx = null }) => {
+    if (bottomPx !== null) {
+      panel.style.setProperty('bottom', bottomPx, 'important');
+      panel.style.setProperty('top', 'auto', 'important');
+    } else if (topPx !== null) {
+      panel.style.setProperty('top', topPx, 'important');
+      panel.style.setProperty('bottom', 'auto', 'important');
+    }
     panel.style.setProperty('right', rightPx, 'important');
-    panel.style.setProperty('bottom', 'auto', 'important');
     panel.style.setProperty('left', 'auto', 'important');
   };
 
-  const applyResponsiveLayout = (isMinimized) => {
+  const applyResponsiveLayout = () => {
     const isMobile = window.innerWidth < 768;
     if (isMobile) {
       panel.style.width = 'calc(100% - 24px)';
@@ -273,8 +306,8 @@ function setupPanelLogic(panel) {
     } else {
       panel.style.left = 'auto';
       panel.style.bottom = 'auto';
-      setPanelFixedPosition(`${PANEL_MARGIN.top}px`, `${PANEL_MARGIN.right}px`);
-      panel.style.width = isMinimized ? 'auto' : '300px';
+      setPanelFixedPosition({ topPx: `${PANEL_MARGIN.expandedTop}px`, rightPx: `${PANEL_MARGIN.expandedRight}px` });
+      panel.style.width = '300px';
     }
   };
 
@@ -286,11 +319,17 @@ function setupPanelLogic(panel) {
 
   const setPanelState = (minimize) => {
     isPanelMinimized = minimize;
-    applyResponsiveLayout(minimize);
+    if (!minimize) {
+      applyResponsiveLayout();
+    }
     if (minimize) {
       panel.style.zIndex = PANEL_Z_INDEX_MINIMIZED;
-      setPanelFixedPosition(`${PANEL_MARGIN.top}px`, `${PANEL_MARGIN.right}px`);
-      panel.style.width = 'auto';
+
+      // Remove placeholder if it exists
+      const placeholder = document.getElementById('rr-dock-placeholder');
+      if (placeholder) placeholder.remove();
+
+      attachToDock(panel, 3);
       expandedView.style.display = 'none';
       expandedView.classList.remove('rr-visible');
       expandedView.classList.add('rr-hidden');
@@ -298,11 +337,42 @@ function setupPanelLogic(panel) {
       requestAnimationFrame(() => {
         minimizedView.classList.remove('rr-hidden');
         minimizedView.classList.add('rr-visible');
-        updateMinimizedAnchorRight();
       });
     } else {
-      panel.style.zIndex = PANEL_Z_INDEX_EXPANDED;
-      setPanelFixedPosition(`${minimizedAnchorTopPx}px`, `${minimizedAnchorRightPx}px`);
+      // Capture current position while docked (before moving)
+      const rect = panel.getBoundingClientRect();
+      const currentTop = rect.top;
+      const currentRight = window.innerWidth - rect.right;
+
+      if (panel.parentElement && panel.parentElement.id === 'gemini-dock') {
+        // Insert placeholder to prevent shift
+        const placeholder = document.createElement('div');
+        placeholder.id = 'rr-dock-placeholder';
+        placeholder.style.cssText = 'width: 56px; height: 56px; margin: 0; padding: 0; display: block; flex-shrink: 0;';
+
+        // Insert placeholder before moving panel
+        panel.parentElement.insertBefore(placeholder, panel);
+
+        // Move panel to body
+        document.body.appendChild(panel);
+      }
+
+      // Clear strict docking styles and restore base panel styles
+      panel.style.cssText = '';
+      panel.style.cssText = `
+        position: fixed;
+        z-index: ${PANEL_Z_INDEX_EXPANDED};
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      `;
+
+      // Apply dynamic position (align right shoulders)
+      const topPx = (currentTop > 0) ? currentTop : (PANEL_MARGIN.expandedTop + 80);
+      const rightPx = (currentRight >= 0) ? currentRight : PANEL_MARGIN.expandedRight;
+
+      setPanelFixedPosition({ topPx: `${topPx}px`, rightPx: `${rightPx}px` });
       panel.style.width = '300px';
       minimizedView.style.display = 'none';
       minimizedView.classList.remove('rr-visible');
@@ -352,15 +422,14 @@ function setupPanelLogic(panel) {
     setPanelState(false);
   });
 
-  tabButtons.forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const tab = btn.dataset.tab;
-      tabButtons.forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      Object.entries(tabPanes).forEach(([key, pane]) => {
-        if (pane) pane.classList.toggle('active', key === tab);
-      });
-    });
+  settingsToggle.addEventListener('click', () => {
+    const isHidden = settingsContent.style.display === 'none';
+    settingsContent.style.display = isHidden ? 'block' : 'none';
+  });
+
+  patternToggle.addEventListener('click', () => {
+    const isHidden = patternContent.style.display === 'none';
+    patternContent.style.display = isHidden ? 'block' : 'none';
   });
 
   toggle.addEventListener('change', (e) => {
@@ -570,7 +639,9 @@ function setupPanelLogic(panel) {
     panel.style.top = `${initialTop + dy}px`;
   });
   document.addEventListener('mouseup', () => { isDragging = false; });
-  window.addEventListener('resize', () => applyResponsiveLayout(isPanelMinimized));
+  window.addEventListener('resize', () => {
+    if (!isPanelMinimized) applyResponsiveLayout();
+  });
 }
 
 function getDialogRoot() {
@@ -725,7 +796,15 @@ async function generateAndAppendDraft(dialog, textarea, options = {}) {
     });
 
     if (!response || !response.success) {
-      showToast(response?.error || '生成に失敗しました', 'error');
+      const errorMsg = response?.error || '生成に失敗しました';
+      // Suppress toast if it's just disabled by user
+      if (errorMsg === 'Auto draft disabled by user.') {
+        // Just stop loading animation
+        textarea.classList.remove('rr-shimmer');
+        delete dialog.dataset.geminiRertProcessing;
+        return;
+      }
+      showToast(errorMsg, 'error');
       return;
     }
 

@@ -82,17 +82,20 @@ document.addEventListener('DOMContentLoaded', () => {
     renderRanking();
 
     // Load saved settings
-    chrome.storage.sync.get(['mode'], (result) => {
+    chrome.storage.sync.get(['mode', 'showStats'], (result) => {
         const mode = result.mode || 'blur'; // Default to blur
         const radio = document.getElementById(mode);
         if (radio) radio.checked = true;
+        const stats = !!result.showStats;
+        const chk = document.getElementById('showStats');
+        if (chk) chk.checked = stats;
     });
 
     // Save settings on change
     document.querySelectorAll('input[name="mode"]').forEach((radio) => {
         radio.addEventListener('change', (e) => {
             const mode = e.target.value;
-            chrome.storage.sync.set({ mode: mode }, () => {
+            chrome.storage.sync.set({ mode }, () => {
                 // Send message to active tab to update immediately
                 chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
                     if (tabs[0]) {
@@ -107,6 +110,22 @@ document.addEventListener('DOMContentLoaded', () => {
             });
         });
     });
+
+    const statsChk = document.getElementById('showStats');
+    if (statsChk) {
+        statsChk.addEventListener('change', (e) => {
+            const show = e.target.checked;
+            chrome.storage.sync.set({ showStats: show }, () => {
+                chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+                    if (tabs[0]) {
+                        chrome.tabs.sendMessage(tabs[0].id, { type: 'SHOW_STATS_UPDATE', show }, () => {
+                            if (chrome.runtime.lastError) {}
+                        });
+                    }
+                });
+            });
+        });
+    }
 
     // Reset Button
     const resetBtn = document.getElementById('resetBtn');

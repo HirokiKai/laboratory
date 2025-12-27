@@ -1,5 +1,5 @@
-// Content Script - X.com Auto Translator (Floating Panel Version)
-console.log('[Gemini Trans] Translator & Panel loaded.');
+// Content Script - X.com 日日日翻訳 (やさしい日本語リライト)
+console.log('[Nichinichi Honyaku] Plain Japanese Rewriter loaded.');
 
 // --- Constants & Config ---
 const MIN_TRANSLATION_DELAY_MS = 300;
@@ -9,8 +9,7 @@ const MAX_BATCH_CHARS = 4000;
 const MAX_PARALLEL_REQUESTS = 2;
 const CHARS_PER_TOKEN = 4;
 const JAPANESE_REGEX = /[ぁ-んァ-ン一-龠]/;
-const DIR_EN_JA = 'en_to_ja';
-const DIR_JA_EN = 'ja_to_en';
+const DIR_JA_SIMPLIFY = 'ja_simplify';
 
 // Shimmer effect for "translating" state
 const SHIMMER_STYLE = `
@@ -61,7 +60,8 @@ const originalTextCache = new Map();
 const translationByTweetId = new Map();
 const expandedRetranslated = new Set();
 let triggerOnboarding = null; // populated inside panel logic
-let translationDirection = DIR_EN_JA;
+// Single direction: Japanese -> easier Japanese
+let translationDirection = DIR_JA_SIMPLIFY;
 
 const isKeyError = (msg = '') => {
     const m = msg.toLowerCase();
@@ -221,8 +221,8 @@ function createPanel() {
     section.style.width = 'auto';
 
     // Icons
-    // 1. Minimized Icon (Gemini "T")
-    const geminiIconSvg = `<span aria-hidden="true" style="display: inline-flex; align-items: center; justify-content: center; width: 100%; height: 100%; font-size: 24px; font-weight: 800; line-height: 1; font-family: system-ui, -apple-system, 'Segoe UI', Arial, sans-serif; color: currentColor;">T</span>`;
+    // 1. Minimized Icon (易)
+    const geminiIconSvg = `<span aria-hidden="true" style="display: inline-flex; align-items: center; justify-content: center; width: 100%; height: 100%; font-size: 24px; font-weight: 800; line-height: 1; font-family: system-ui, -apple-system, 'Segoe UI', Arial, sans-serif; color: currentColor;">易</span>`;
 
     // 2. Close/Minimize Icon (Down Arrow)
     const closeIconSvg = `<svg viewBox="0 0 24 24" aria-hidden="true" style="color: #536471; width: 20px; height: 20px;"><g><path d="M12 15.41l-7.29-7.29 1.41-1.42L12 12.59l5.88-5.89 1.41 1.42L12 15.41z" fill="currentColor"></path></g></svg>`;
@@ -272,7 +272,7 @@ function createPanel() {
             
             <!-- Header -->
             <div id="gx-header" class="css-175oi2r" style="cursor: move; padding: 12px 16px 8px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #eff3f4; min-height: 50px;">
-                <div style="font-weight: 800; font-size: 15px; color: #0f1419;">Gemini Trans</div>
+                <div style="font-weight: 800; font-size: 15px; color: #0f1419;">日日翻訳｜やさしい日本語</div>
             </div>
 
             
@@ -281,7 +281,7 @@ function createPanel() {
                 
                 <!-- Auto Translate Toggle -->
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-                    <span style="font-size: 14px; font-weight: 700; color: #0f1419;">自動翻訳</span>
+                    <span style="font-size: 14px; font-weight: 700; color: #0f1419;">自動リライト</span>
                     <label style="position: relative; display: inline-block; width: 44px; height: 24px;">
                         <input type="checkbox" id="gx-toggle" checked style="opacity: 0; width: 0; height: 0;">
                         <span style="position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: rgb(29, 155, 240); transition: .4s; border-radius: 24px;"></span>
@@ -342,7 +342,7 @@ function createPanel() {
                 </div>
 
                 <!-- Save Button -->
-                <button id="gx-save" style="width: 100%; margin-top: 16px; background-color: #0f1419; color: white; border: none; padding: 12px; border-radius: 9999px; cursor: pointer; font-weight: 700; font-size: 14px; transition: background 0.2s;">保存</button>
+                <button id="gx-save" style="width: 100%; margin-top: 16px; background-color: #0f1419; color: white; border: none; padding: 12px; border-radius: 9999px; cursor: pointer; font-weight: 700; font-size: 14px; transition: background 0.2s;">保存して開始</button>
                 <div id="gx-msg" style="text-align: center; font-size: 12px; margin-top: 8px; min-height: 16px; color: #00ba7c;"></div>
             </div>
         </div>
@@ -629,7 +629,7 @@ function setupPanelLogic(panel) {
 
 
     // Load State from Storage
-    chrome.storage.local.get(['isAutoTranslateEnabled', 'geminiModel', 'modelStats', 'geminiApiKey', 'translationDirection', MODEL_MIGRATION_KEY], (res) => {
+    chrome.storage.local.get(['isAutoTranslateEnabled', 'geminiModel', 'modelStats', 'geminiApiKey', MODEL_MIGRATION_KEY], (res) => {
         // Toggle
         const isEnabled = res.isAutoTranslateEnabled !== false;
         toggle.checked = isEnabled && !!res.geminiApiKey;
@@ -650,7 +650,7 @@ function setupPanelLogic(panel) {
         modelSelect.value = currentModel;
         if (res.geminiApiKey) apiKeyInput.value = res.geminiApiKey;
         cachedApiKey = (res.geminiApiKey || '').trim();
-        translationDirection = DIR_EN_JA;
+        translationDirection = DIR_JA_SIMPLIFY;
 
         // Default to minimized on load (top-right, shifted left)
         setPanelState(true);
@@ -940,7 +940,7 @@ function renderTranslation(element) {
     ensureDualBlocks(element);
     const translationBlock = element.querySelector('.gx-translation-block');
     translationBlock.textContent = translated;
-    const pill = createPill('原文');
+    const pill = createPill('元の文');
     pill.addEventListener('click', (e) => {
         e.stopPropagation();
         toggleMode(element);
@@ -953,7 +953,7 @@ function renderTranslation(element) {
 function renderOriginal(element) {
     ensureDualBlocks(element);
     const originalBlock = element.querySelector('.gx-original-block');
-    const pill = createPill('翻訳');
+    const pill = createPill('やさしい文');
     pill.addEventListener('click', (e) => {
         e.stopPropagation();
         toggleMode(element);
@@ -1132,11 +1132,8 @@ function checkAndQueue(element) {
     }
     if (element.dataset.geminiTranslated) return;
     const hasJapanese = JAPANESE_REGEX.test(text);
-    if (translationDirection === DIR_EN_JA && hasJapanese) {
-        element.dataset.geminiTranslated = 'skipped';
-        return;
-    }
-    if (translationDirection === DIR_JA_EN && !hasJapanese) {
+    // Only process Japanese text; skip others
+    if (!hasJapanese) {
         element.dataset.geminiTranslated = 'skipped';
         return;
     }

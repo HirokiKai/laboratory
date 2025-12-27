@@ -1,8 +1,8 @@
 {
     "manifest_version": 3,
-    "name": "Gemini Trans Translator",
-    "version": "4.0",
-    "description": "Auto-translate English tweets on X.com to Japanese using Gemini API.",
+    "name": "日日翻訳 (やさしい日本語)",
+    "version": "1.0",
+    "description": "X.comの難しい日本語を「やさしい日本語」に書き換えて表示します。Gemini API使用。",
     "permissions": [
         "storage"
     ],

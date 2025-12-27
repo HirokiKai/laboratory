@@ -40,11 +40,55 @@ const PRICING = {
 };
 
 const PANEL_MARGIN = {
-  top: 90,
-  right: 20
+  expandedTop: 110,
+  expandedRight: 12,
+  minimizedBottom: 130,
+  minimizedRight: 12
 };
 const PANEL_Z_INDEX_EXPANDED = 2147483647;
 const PANEL_Z_INDEX_MINIMIZED = 2147483000;
+
+// Shared Dock Logic
+function ensureDock() {
+  let dock = document.getElementById('gemini-dock');
+  if (!dock) {
+    dock = document.createElement('div');
+    dock.id = 'gemini-dock';
+    dock.style.cssText = 'position:fixed; right:16px; top:80px; z-index:2147483600; display:flex; flex-direction:column; gap:12px; align-items:flex-end; pointer-events:none;';
+    document.body.appendChild(dock);
+  }
+  return dock;
+}
+
+function attachToDock(panel, order = 2) {
+  const dock = ensureDock();
+  panel.dataset.gemDockOrder = order;
+  dock.appendChild(panel);
+  Array.from(dock.children)
+    .sort((a, b) => (parseInt(a.dataset.gemDockOrder || '0', 10) - parseInt(b.dataset.gemDockOrder || '0', 10)))
+    .forEach((el) => dock.appendChild(el));
+
+  // Reset styles first to ensure clean slate
+  panel.style.cssText = '';
+
+  // Apply strict styles from standard template
+  panel.style.setProperty('position', 'static', 'important');
+  panel.style.setProperty('width', '56px', 'important');
+  panel.style.setProperty('height', '56px', 'important');
+  panel.style.setProperty('min-width', '56px', 'important');
+  panel.style.setProperty('margin', '0', 'important');
+  panel.style.setProperty('padding', '0', 'important');
+  panel.style.setProperty('box-sizing', 'border-box', 'important');
+  panel.style.setProperty('display', 'block', 'important');
+  panel.style.setProperty('align-self', 'flex-end', 'important');
+  panel.style.setProperty('pointer-events', 'auto', 'important');
+  panel.style.setProperty('z-index', 'auto', 'important');
+  panel.style.setProperty('float', 'none', 'important');
+  panel.style.setProperty('clear', 'none', 'important');
+  panel.style.setProperty('inset', 'auto', 'important');
+
+  dock.style.pointerEvents = 'none';
+}
 
 let summaryQueue = [];
 let inFlightRequests = 0;
@@ -162,6 +206,10 @@ function queueResummary(element, text) {
 }
 
 function createPanel() {
+  // Cleanup duplicates first
+  const existing = document.querySelectorAll('[id^="gemini-oneword-panel"]');
+  existing.forEach(p => p.remove());
+
   const section = document.createElement('div');
   section.id = 'gemini-oneword-panel';
   section.style.cssText = `
@@ -169,8 +217,8 @@ function createPanel() {
     z-index: ${PANEL_Z_INDEX_MINIMIZED};
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   `;
-  section.style.top = `${PANEL_MARGIN.top}px`;
-  section.style.right = `${PANEL_MARGIN.right}px`;
+  section.style.top = `${PANEL_MARGIN.expandedTop}px`;
+  section.style.right = `${PANEL_MARGIN.expandedRight}px`;
   section.style.bottom = 'auto';
   section.style.left = 'auto';
   section.style.width = 'auto';
@@ -197,7 +245,7 @@ function createPanel() {
     <div id="go-expanded-view" class="css-175oi2r r-105ug2t r-14lw9ot r-1867qdf r-1upvrn0 r-13awgt0 r-1ce3o0f r-1udh08x r-u8s1d r-13qz1uu go-hidden" style="width: 300px; max-height: 80vh; display: none; flex-direction: column; box-shadow: rgba(101, 119, 134, 0.2) 0px 0px 15px, rgba(101, 119, 134, 0.15) 0px 0px 3px 1px; border-radius: 16px; background-color: white; position: relative;">
       <button id="go-minimize-btn" type="button" style="position: absolute; top: 8px; right: 8px; background: rgba(0,0,0,0.05); border: none; border-radius: 50%; width: 32px; height: 32px; display: flex; justify-content: center; align-items: center; cursor: pointer; transition: background 0.2s; z-index: 1;">${closeIconSvg}</button>
       <div id="go-header" class="css-175oi2r" style="cursor: move; padding: 12px 16px 8px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #eff3f4; min-height: 50px;">
-        <div style="font-weight: 800; font-size: 15px; color: #0f1419;">Gemini Oneword</div>
+        <div style="font-weight: 800; font-size: 15px; color: #0f1419;">Gemini 1word</div>
       </div>
       <div id="go-body" style="padding: 16px; overflow-y: auto;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
@@ -247,7 +295,7 @@ function createPanel() {
               </div>
             </div>
           </div>
-          <div style="margin: 0 0 15px 0; padding: 10px 12px; border: 1px solid #eff3f4; border-radius: 10px; background-color: #f7f9f9;">
+          <div style="margin: 0 0 15px 0; padding: 10px 12px; border: 1px solid #eff3f4; border-radius: 8px; background-color: #f7f9f9;">
             <div style="font-size: 11px; font-weight: 700; color: #536471; margin-bottom: 6px;">モデル料金 (USD / 1M tokens)</div>
             <div style="display: grid; grid-template-columns: 1fr auto auto; column-gap: 8px; row-gap: 4px; font-size: 11px; color: #0f1419;">
               <div style="font-weight: 700;">Model</div><div style="font-weight: 700; text-align: right;">In</div><div style="font-weight: 700; text-align: right;">Out</div>
@@ -272,11 +320,9 @@ function createPanel() {
 
     <!-- MINIMIZED VIEW -->
     <div id="go-minimized-view" class="go-visible" style="display: block; cursor: pointer;">
-      <div style="display: flex; flex-direction: column; gap: 8px; align-items: center;">
-        <div id="go-minimize-main" class="css-175oi2r r-105ug2t r-1867qdf r-1upvrn0 r-13awgt0 r-1ce3o0f r-1udh08x r-u8s1d r-13qz1uu r-173mn98 r-1e5uvyk r-6026j r-1xsrhxi r-rs99b7 r-12jitg0" style="width: 50px; height: 50px; border-radius: 12px; color: #0f1419; box-shadow: rgba(101, 119, 134, 0.2) 0px 0px 8px, rgba(101, 119, 134, 0.25) 0px 1px 3px 1px; border: 2px solid transparent;">
+        <div id="go-minimize-main" class="css-175oi2r r-105ug2t r-1867qdf r-1upvrn0 r-13awgt0 r-1ce3o0f r-1udh08x r-u8s1d r-13qz1uu r-173mn98 r-1e5uvyk r-6026j r-1xsrhxi r-rs99b7 r-12jitg0" style="width: 56px; height: 56px; border-radius: 12px; color: #0f1419; box-shadow: rgba(101, 119, 134, 0.2) 0px 0px 8px, rgba(101, 119, 134, 0.25) 0px 1px 3px 1px; border: 2px solid transparent;">
           <button id="go-open-panel" role="button" type="button" style="align-items: center; justify-content: center; width: 100%; height: 100%; background: transparent; border: none; padding: 0; cursor: pointer;">${jIconSvg}</button>
         </div>
-      </div>
     </div>
   `;
 
@@ -304,14 +350,19 @@ function setupPanelLogic(panel) {
   const minimizedMain = panel.querySelector('#go-open-panel');
   const minimizedMainWrap = panel.querySelector('#go-minimize-main');
 
-  const setPanelFixedPosition = (topPx, rightPx) => {
-    panel.style.setProperty('top', topPx, 'important');
+  const setPanelFixedPosition = ({ topPx = null, rightPx = '12px', bottomPx = null }) => {
+    if (bottomPx !== null) {
+      panel.style.setProperty('bottom', bottomPx, 'important');
+      panel.style.setProperty('top', 'auto', 'important');
+    } else if (topPx !== null) {
+      panel.style.setProperty('top', topPx, 'important');
+      panel.style.setProperty('bottom', 'auto', 'important');
+    }
     panel.style.setProperty('right', rightPx, 'important');
-    panel.style.setProperty('bottom', 'auto', 'important');
     panel.style.setProperty('left', 'auto', 'important');
   };
 
-  const applyResponsiveLayout = (isMinimized) => {
+  const applyResponsiveLayout = () => {
     const isMobile = window.innerWidth < 768;
     if (isMobile) {
       panel.style.width = 'calc(100% - 24px)';
@@ -322,16 +373,21 @@ function setupPanelLogic(panel) {
     } else {
       panel.style.left = 'auto';
       panel.style.bottom = 'auto';
-      setPanelFixedPosition(`${PANEL_MARGIN.top}px`, `${PANEL_MARGIN.right}px`);
-      panel.style.width = isMinimized ? 'auto' : '300px';
+      setPanelFixedPosition({ topPx: `${PANEL_MARGIN.expandedTop}px`, rightPx: `${PANEL_MARGIN.expandedRight}px` });
+      panel.style.width = '300px';
     }
   };
 
   const setPanelState = (minimize) => {
     isPanelMinimized = minimize;
-    applyResponsiveLayout(minimize);
     if (minimize) {
       panel.style.zIndex = PANEL_Z_INDEX_MINIMIZED;
+
+      // Remove placeholder if it exists
+      const placeholder = document.getElementById('go-dock-placeholder');
+      if (placeholder) placeholder.remove();
+
+      attachToDock(panel, 2);
       expandedView.style.display = 'none';
       expandedView.classList.remove('go-visible');
       expandedView.classList.add('go-hidden');
@@ -341,9 +397,47 @@ function setupPanelLogic(panel) {
         minimizedView.classList.add('go-visible');
       });
     } else {
-      panel.style.zIndex = PANEL_Z_INDEX_EXPANDED;
-      setPanelFixedPosition(`${PANEL_MARGIN.top}px`, `${PANEL_MARGIN.right}px`);
-      panel.style.width = '300px';
+      // Capture current position while docked (before moving)
+      const rect = panel.getBoundingClientRect();
+      const currentTop = rect.top;
+      const currentRight = window.innerWidth - rect.right;
+
+      if (panel.parentElement && panel.parentElement.id === 'gemini-dock') {
+        // Insert placeholder to prevent shift
+        const placeholder = document.createElement('div');
+        placeholder.id = 'go-dock-placeholder';
+        placeholder.style.cssText = 'width: 56px; height: 56px; margin: 0; padding: 0; display: block; flex-shrink: 0;';
+
+        // Insert placeholder before moving panel
+        panel.parentElement.insertBefore(placeholder, panel);
+
+        // Move panel to body
+        document.body.appendChild(panel);
+      }
+
+      // Clear strict docking styles and restore base panel styles
+      panel.style.cssText = '';
+      panel.style.cssText = `
+        position: fixed;
+        z-index: ${PANEL_Z_INDEX_EXPANDED};
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      `;
+
+      const isMobile = window.innerWidth < 768;
+      if (isMobile) {
+        applyResponsiveLayout();
+      } else {
+        // Desktop: align right shoulders
+        const topPx = (currentTop > 0) ? currentTop : (PANEL_MARGIN.expandedTop + 80);
+        const rightPx = (currentRight >= 0) ? currentRight : PANEL_MARGIN.expandedRight;
+
+        setPanelFixedPosition({ topPx: `${topPx}px`, rightPx: `${rightPx}px` });
+        panel.style.width = '300px';
+      }
+
       minimizedView.style.display = 'none';
       minimizedView.classList.remove('go-visible');
       minimizedView.classList.add('go-hidden');
@@ -505,7 +599,9 @@ function setupPanelLogic(panel) {
     costEl.textContent = '$' + (inCost + outCost).toFixed(5);
   }
   document.addEventListener('mouseup', () => { isDragging = false; });
-  window.addEventListener('resize', () => applyResponsiveLayout(isPanelMinimized));
+  window.addEventListener('resize', () => {
+    if (!isPanelMinimized) applyResponsiveLayout();
+  });
 }
 
 function requestSummary(texts) {

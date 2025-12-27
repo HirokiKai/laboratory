@@ -1,11 +1,11 @@
 let currentMode = 'off';
 let observer = null;
-let intervalId = null;
 let interactionStats = {}; // Cache for stats: { 'username': { like: 0, rt: 0, reply: 0 } }
+let showStats = false;
 
 // --- SMART GENERATOR ---
-const ADJECTIVES = ['眠そうな', '踊る', '勇気ある', '静かな', '謎の', '光る', '幸せな', '高速の', '歌う', '空飛ぶ', '派手な', '小さな', '賢い', '腹ペコの', '最強の'];
-const ANIMALS = ['パンダ', '猫', 'サボテン', 'ライオン', 'ペンギン', '幽霊', 'ロボット', 'トマト', 'ウサギ', 'ドラゴン', 'キリン', 'ゴリラ', '魔法使い', '忍者', '侍'];
+const ADJECTIVES = ['青い', '速い', '静かな', '丸い', '鋭い', '軽い', '白い', '黒い', '柔らか', '強い', '淡い', '新しい'];
+const ANIMALS = ['猫', '犬', '狐', '鳥', '熊', '鹿', '鯨', '蛍', '鮫', '鷹', '梟', '狼'];
 
 // --- UTILS ---
 function simpleHash(str) {
@@ -33,6 +33,7 @@ function getRandomIdentity(username) {
 }
 
 function getStatsString(username) {
+    if (!showStats) return '';
     const stats = interactionStats[username];
     if (!stats) return '';
 
@@ -53,7 +54,6 @@ function applyMode(mode) {
     document.body.classList.remove('xa-blur-mode', 'xa-random-mode');
 
     if (observer) { observer.disconnect(); observer = null; }
-    if (intervalId) { clearInterval(intervalId); intervalId = null; }
 
     restoreOriginalContent(); // Always clean up first
 
@@ -62,17 +62,14 @@ function applyMode(mode) {
     } else if (mode === 'random') {
         document.body.classList.add('xa-random-mode');
 
-        // Use Interval + MutationObserver for maximum robustness against React
         runRandomReplacement();
 
         observer = new MutationObserver(() => {
             runRandomReplacement();
         });
         observer.observe(document.body, { childList: true, subtree: true });
-
-        // Periodic check to catch re-renders that MutationObserver might miss or be slow on
-        intervalId = setInterval(runRandomReplacement, 1000);
     }
+
 }
 
 function runRandomReplacement() {
@@ -122,22 +119,25 @@ function runRandomReplacement() {
 
             // We want to target the element that contains the visual name.
             // Let's find the span that acts as the "name" part (no @, no dot).
-            const spans = Array.from(container.querySelectorAll('span'));
-            const namePartSpan = spans.find(span => {
-                const text = span.innerText;
-                return text && !text.includes('@') && text !== '·' && !span.closest('time');
-            });
+    const spans = Array.from(container.querySelectorAll('span'));
+    const namePartSpan = spans.find(span => {
+        const text = span.innerText;
+        return text && !text.includes('@') && text !== '·' && !span.closest('time');
+    });
 
             if (namePartSpan) {
                 // We target the DIRECT PARENT of the name text to be the replacement container
                 // This usually holds the name + emoji parts.
-                const nameParent = namePartSpan.parentElement;
+    const nameParent = namePartSpan.parentElement;
 
                 // Safety check: Don't accidentally target the handle container if logic failed
                 if (nameParent && !nameParent.innerText.includes('@')) {
                     if (nameParent.getAttribute('data-xa-fake-name') !== fullDisplayName) {
                         nameParent.setAttribute('data-xa-fake-name', fullDisplayName);
                         nameParent.classList.add('xa-name-replaced'); // Add class for CSS targeting
+                        nameParent.style.display = 'inline-flex';
+                        nameParent.style.alignItems = 'center';
+                        nameParent.style.gap = '4px';
                     }
                 }
             }
@@ -165,6 +165,7 @@ function restoreOriginalContent() {
         span.classList.remove('xa-name-replaced');
     });
 }
+
 
 // --- INTERACTION TRACKING ---
 
@@ -307,9 +308,18 @@ document.addEventListener('click', (e) => {
 
 // --- EVENT LISTENERS ---
 
+chrome.storage.sync.get(['mode', 'showStats'], (res) => {
+    currentMode = res.mode || 'off';
+    showStats = !!res.showStats;
+    applyMode(currentMode);
+});
+
 chrome.runtime.onMessage.addListener((request) => {
     if (request.type === 'MODE_UPDATE') {
         applyMode(request.mode);
+    } else if (request.type === 'SHOW_STATS_UPDATE') {
+        showStats = !!request.show;
+        runRandomReplacement();
     } else if (request.type === 'STATS_RESET') {
         interactionStats = {};
         runRandomReplacement();

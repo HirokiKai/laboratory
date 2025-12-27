@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>NanoBanana 設定</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; }
+    label { display: block; margin-bottom: 8px; font-weight: 700; }
+    input { width: 320px; padding: 10px; font-size: 14px; }
+    button { margin-top: 12px; padding: 10px 16px; font-size: 14px; }
+    .msg { margin-top: 10px; font-size: 13px; color: #2ecc71; }
+  </style>
+</head>
+<body>
+  <h1>APIキー設定</h1>
+  <label for="apiKey">GEMINI_API_KEY</label>
+  <input id="apiKey" type="password" placeholder="AI Studioのキー" />
+  <br />
+  <button id="save">保存</button>
+  <div id="msg" class="msg"></div>
+  <script src="options.js"></script>
+</body>
+</html>
